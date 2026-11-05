@@ -2,7 +2,7 @@
   "name": "dsh-qoder-oauth",
   "displayName": "Qoder OAuth",
   "description": "Qoder (CN and Global), CodeBuddy and MiniMax Code login and model provider for DeepSeek Harness, via the official CLIs and Agent SDKs.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "license": "MIT",
   "author": "Fizor-drm",
