@@ -1,0 +1,181 @@
+/**
+ * Account quota and usage, read through the CLI's own control protocol.
+ *
+ * The SDK exposes `getUsageInfo()`, which asks the CLI to query the account's
+ * quota endpoint with the credentials the CLI already holds — the same numbers
+ * the Qoder desktop and VS Code clients show on their account panel. Doing it
+ * this way (rather than calling the endpoint ourselves) keeps token refresh,
+ * endpoint election and encryption inside the CLI, which owns them.
+ *
+ * One short-lived query is enough: no model turn runs, and the answer is cached
+ * for a minute so opening the settings page repeatedly does not spawn a CLI on
+ * every render. Failures are returned, not thrown: a page that cannot read the
+ * quota must still render the rest of its settings.
+ *
+ * @module dsh-qoder-oauth/usage
+ */
+
+import type { AccountInfo, UsageInfo } from '@qodercn-ai/qodercn-agent-sdk'
+import type { Live } from './live.ts'
+import { readLive } from './live.ts'
+import { cliConflictMessage, cliFailureText, foreignCliOverride, qoderCliOptions, resolveQoderCli } from './cli.ts'
+import { withTimeout } from './models.ts'
+import type { QoderBrand } from './brand.ts'
+import { brandProfile } from './brand.ts'
+import type { QoderSdkModule } from './sdk.ts'
+import { withSdk } from './sdk.ts'
+
+/** How long one quota reading stays fresh by default. */
+export const DEFAULT_USAGE_CACHE_TTL_MS = 60_000
+/** Upper bound on one quota round trip. */
+export const DEFAULT_USAGE_TIMEOUT_MS = 20_000
+
+/** One quota reading, successful or not. */
+export interface UsageSnapshot {
+  /** When the reading was taken. */
+  at: number
+  /** Account quota; absent when the CLI could not answer. */
+  usage?: UsageInfo
+  /** Signed-in account identity, when the CLI reports it. */
+  account?: AccountInfo
+  /** Why the quota is missing, in the CLI's own words. */
+  error?: string
+  /**
+   * Whether this edition's CLI is absent from the machine right now.
+   *
+   * The page keeps its last good reading visible while a refresh fails, which
+   * is right for a dropped network — but not after an uninstall: the account,
+   * plan and credits it shows belong to a CLI that is no longer installed.
+   * This flag tells the page to drop that reading instead of labelling it
+   * "last reading".
+   */
+  cliMissing?: boolean
+}
+
+/** Streaming prompt that never yields, so no model turn runs during the read. */
+async function* inertInput(): AsyncGenerator<never> {
+  await new Promise<never>(() => {})
+}
+
+/** Cached quota reader for one brand. */
+export class QoderUsage {
+  private cached: UsageSnapshot | undefined
+  private inflight: { epoch: number, promise: Promise<UsageSnapshot> } | undefined
+  /**
+   * Bumped by {@link invalidate}. A fetch that started before a sign-in may
+   * still resolve with the previous account's numbers, so it must neither be
+   * shared with later readers nor written back to the cache.
+   */
+  private epoch = 0
+
+  /**
+   * @param brand - which edition's CLI answers.
+   * @param ttlMs - how long a reading stays fresh; read per use.
+   * @param timeoutMs - how long one round trip may take.
+   */
+  constructor(
+    private readonly brand: QoderBrand,
+    private readonly ttlMs: Live<number> = DEFAULT_USAGE_CACHE_TTL_MS,
+    private readonly timeoutMs: Live<number> = DEFAULT_USAGE_TIMEOUT_MS,
+  ) {}
+
+  /**
+   * Read the quota, or serve the cached reading while it is still fresh.
+   *
+   * @param fresh - ignore the cache; the page's refresh button.
+   * @returns the reading; `error` carries a failed lookup instead of throwing.
+   */
+  async read(fresh = false): Promise<UsageSnapshot> {
+    // An uninstalled CLI makes every cached number describe a machine state
+    // that no longer exists: the account, plan and credits came from a binary
+    // that is gone. Answer that before the cache is consulted, and drop the
+    // reading so the page cannot paint it again on the next render.
+    if (resolveQoderCli(this.brand) === undefined) {
+      this.cached = undefined
+      return this.missingCli()
+    }
+    const ttlMs = readLive(this.ttlMs, DEFAULT_USAGE_CACHE_TTL_MS)
+    const epoch = this.epoch
+    if (!fresh && this.cached !== undefined && Date.now() - this.cached.at < ttlMs) return this.cached
+    let entry = this.inflight
+    if (entry === undefined || entry.epoch !== epoch) {
+      const promise = this.fetch()
+      entry = { epoch, promise }
+      this.inflight = entry
+      const settled = entry
+      const clear = (): void => {
+        if (this.inflight === settled) this.inflight = undefined
+      }
+      void promise.then(clear, clear)
+    }
+    const snapshot = await entry.promise
+    if (epoch === this.epoch) this.cached = snapshot
+    return snapshot
+  }
+
+  /** Drop the cached reading, including any fetch that started before now. */
+  invalidate(): void {
+    this.cached = undefined
+    this.epoch += 1
+    this.inflight = undefined
+  }
+
+  /** The reading for a machine whose CLI is not installed. */
+  private missingCli(): UsageSnapshot {
+    const command = brandProfile(this.brand).cliCommands[0]
+    return {
+      at: Date.now(),
+      cliMissing: true,
+      error: `未检测到可用的 ${command}，请先安装并登录后再使用此版本。`,
+    }
+  }
+
+  private async fetch(): Promise<UsageSnapshot> {
+    const at = Date.now()
+    try {
+      const conflict = foreignCliOverride(this.brand)
+      if (conflict !== undefined) {
+        return { at, cliMissing: true, error: cliConflictMessage(this.brand) }
+      }
+      return await withSdk(this.brand, sdk => this.readSnapshot(sdk, at))
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      // The quota card is the first thing a user sees on a machine without the
+      // CLI. Point at installing it instead of echoing spawn/package errors.
+      const command = brandProfile(this.brand).cliCommands[0]
+      const missingCli = /ENOENT|not found|Cannot find package|未安装国际版 SDK/i.test(detail)
+      return {
+        at,
+        error: missingCli ? `未检测到可用的 ${command}，请先安装并登录后再读取额度。` : cliFailureText(detail, this.brand),
+      }
+    }
+  }
+
+  private async readSnapshot(sdk: QoderSdkModule, at: number): Promise<UsageSnapshot> {
+    const timeoutMs = readLive(this.timeoutMs, DEFAULT_USAGE_TIMEOUT_MS)
+    const q = sdk.query({
+      prompt: inertInput(),
+      options: {
+        ...qoderCliOptions(this.brand),
+        auth: sdk.qodercliAuth(),
+        tools: [],
+        allowedTools: [],
+        settingSources: [],
+        maxTurns: 1,
+      },
+    })
+    try {
+      const usage = await withTimeout(q.getUsageInfo(), timeoutMs)
+      // Account identity is secondary: a CLI that predates the control request
+      // still delivers the quota, and the card simply omits the account line.
+      const account = await withTimeout(q.accountInfo(), timeoutMs).catch(() => undefined)
+      return {
+        at,
+        ...usage === null || usage === undefined ? { error: 'CLI 未返回额度信息' } : { usage },
+        ...account === undefined ? {} : { account },
+      }
+    } finally {
+      await q.close().catch(() => undefined)
+    }
+  }
+}

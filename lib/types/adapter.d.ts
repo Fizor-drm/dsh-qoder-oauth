@@ -1,0 +1,329 @@
+/**
+ * `QoderAdapter`: route the harness LLM seam onto a local Qoder CLI account
+ * through the qoder-agent-sdk. One warm inner session per host session id
+ * carries the conversation (model turns and tool rounds live inside it); host
+ * tool schemas are exposed to the inner model through an in-process MCP
+ * server whose handlers park until the host delivers tool results on the next
+ * request. Side-channel requests (titles, compaction) run cold one-shots.
+ * @module dsh-llm-qoder/adapter
+ */
+import { LlmAdapter } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, PreparedAdapterCall, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
+import type { QoderBrand } from './brand.ts';
+import type { Live } from './live.ts';
+import { QoderModelCatalog } from './models.ts';
+import type { Feed, ImagePathResolver } from './render.ts';
+import type { UsageSnapshot } from './usage.ts';
+/**
+ * Read one durable image occurrence into the bytes a request sends.
+ * Implemented over `ctx.attachments`; returns undefined when the object is
+ * unreadable, which degrades that one image instead of failing the turn.
+ */
+export type ImageRequestReader = (ref: ImageAttachmentRef, signal?: AbortSignal) => Promise<{
+    bytes: Uint8Array;
+    mediaType: string;
+} | undefined>;
+/**
+ * Options for {@link QoderAdapter}.
+ *
+ * Most values are {@link Live}: a plain value, or a thunk the adapter calls
+ * where it uses the option. The plugin passes thunks over its volatile config
+ * cells, because a settings edit is committed in place without restarting the
+ * plugin (`src/live.ts`) — an adapter that copied these into fields would keep
+ * serving the values it was constructed with.
+ */
+export interface QoderAdapterOptions {
+    /** Maximum simultaneously warm inner sessions (default 8). */
+    maxSessions?: Live<number>;
+    /** How long a fetched CLI model catalog stays fresh (default 5 min). */
+    modelCacheTtlMs?: Live<number>;
+    /** Request-image reader; absent → images are never forwarded as pixels. */
+    readImage?: ImageRequestReader;
+    /**
+     * The tool-world path of one image, for the handle text that lets the model
+     * edit it. Absent → an unreadable image keeps the harness placeholder.
+     */
+    imagePath?: ImagePathResolver;
+    /** How long an unpaired MCP tool handler waits before failing its call. */
+    toolResultTimeoutMs?: Live<number>;
+    /** How long the inner process gets to acknowledge an abort. */
+    abortGraceMs?: Live<number>;
+    /** Maximum inner turns for one side-channel request. */
+    coldMaxTurns?: Live<number>;
+    /** How long one CLI catalog fetch may take before the static fallback. */
+    catalogFetchTimeoutMs?: Live<number>;
+    /**
+     * Per-model context window in tokens, keyed by Qoder model id. A model with
+     * no entry uses the window upstream declares for it.
+     */
+    modelContextWindows?: Live<Readonly<Record<string, number>>>;
+    /** Output-token cap assumed when a model reports none. */
+    defaultMaxTokens?: Live<number>;
+    /** Model ids switched off; hidden from the picker. */
+    disabledModels?: Live<readonly string[]>;
+    /** Extra harness-id → Qoder-id aliases, merged over the built-in ones. */
+    modelAliases?: Live<Readonly<Record<string, string>>>;
+    /** Reasoning effort used when a request names none. */
+    defaultReasoningEffort?: Live<string | undefined>;
+    /** Display name of the primary provider group. */
+    displayName?: Live<string>;
+    /** Which edition this adapter serves; defaults to the CN one. */
+    brand?: QoderBrand;
+    /** How long one quota reading stays fresh; read per use. */
+    usageCacheTtlMs?: Live<number>;
+}
+/** The primary provider route (the CN account's own models). */
+export declare const QODER_PROVIDER = "qoder-cn";
+/** The international edition's route; a second adapter instance serves it. */
+export declare const QODER_INTL_PROVIDER = "qoder-intl";
+/** The window facts one live catalog entry carries. */
+export type WindowFacts = {
+    maxInputTokens?: number;
+    defaultContextWindow?: number;
+    availableContextWindows?: readonly number[];
+};
+/**
+ * Decide the context window to report for one live model.
+ *
+ * A per-model override wins when the user chose one; otherwise upstream's own
+ * `defaultContextWindow` is used, which is the window that model's session
+ * actually runs with. `maxInputTokens` is NOT a substitute — it is the ceiling
+ * for a single request and is often lower than the session window (e.g. 180 000
+ * against a 200 000 session), so falling back to it would understate capacity.
+ * Callers that accept a user override should validate it against
+ * `availableContextWindows` first — see {@link resolveDeclaredWindow}.
+ *
+ * @param live - the live catalog entry, when the CLI answered.
+ * @param override - the user's chosen window for this model, if any.
+ * @param fallback - window used when the catalog has nothing for this model.
+ * @returns the window in tokens.
+ */
+export declare function pickContextWindow(live: WindowFacts | undefined, override: number | undefined, fallback: number): number;
+/**
+ * The window the CLI will actually run this route with.
+ *
+ * Not the same thing as the window the harness is told about. A deployment may
+ * declare any window it likes — `modelContextWindows` accepts arbitrary numbers
+ * — but the CLI only honours one the model advertises in
+ * `availableContextWindows`; anything else it silently ignores and keeps its own
+ * default. Since the CLI measures `context_usage_ratio` against the window it is
+ * really using, this is the only correct multiplier for that ratio: using the
+ * declared window instead inflates every reading by
+ * `declared / actually-honoured` (5x for a 1M override on a 200K-only model).
+ *
+ * @param live - the live catalog entry, when the CLI answered.
+ * @param declared - the window this route publishes to the harness.
+ * @returns the window the CLI runs with, or undefined when unknown.
+ */
+export declare function cliContextWindow(live: WindowFacts | undefined, declared: number): number | undefined;
+/**
+ * The window to publish for one route, which is also the one the CLI is told
+ * to run with.
+ *
+ * A live entry is authoritative: the user's override counts only when the
+ * model advertises it. The CLI silently ignores anything else (a 1M choice on
+ * a 200K-only route), and dividing by it would understate every reading
+ * fivefold. When the catalog is momentarily unavailable, the last successful
+ * answer is reused instead of the static 200K default — that fallback used to
+ * change the denominator, and the compaction budget, mid-session: a 1M
+ * conversation read 1M one turn and 200K the next, and then compacted at what
+ * looked like 10%.
+ */
+export declare function resolveDeclaredWindow(live: WindowFacts | undefined, override: number | undefined, remembered: number | undefined, fallback: number): number;
+/**
+ * The strongest level a model offers.
+ *
+ * Switching model or level must start at the most capable setting the route
+ * accepts, the same rule the sibling adapter plugin uses; the previous
+ * behaviour of following upstream's own default meant some models silently
+ * started one or two steps down (`CodeBuddy` advertises `high` as its default
+ * even when `max` is selectable).
+ *
+ * @param efforts - the levels the route accepts, in upstream order.
+ * @returns the strongest id, or undefined for a non-reasoning model.
+ */
+export declare function strongestEffort(efforts: readonly string[]): string | undefined;
+/**
+ * Build the `reasoning` metadata block for a resolved model, or undefined
+ * when the model does not support reasoning.
+ *
+ * The starting level is the strongest one the model accepts, not the level
+ * upstream happens to name as its default: the user's explicit choice in the
+ * sibling plugin, applied here too. An explicit configuration value still wins
+ * when the model accepts it.
+ *
+ * @param efforts - CLI-reported effort ids (absent for reasoning-less models).
+ * @param configuredEffort - user-configured starting level, when any.
+ * @param isReasoning - whether the model supports reasoning per the CLI.
+ * @returns the harness reasoning metadata, or undefined to omit it.
+ */
+export declare function reasoningInfo(efforts: readonly string[] | undefined, configuredEffort: string | undefined, isReasoning: boolean | undefined): LlmModelReasoningInfo | undefined;
+/**
+ * The Qoder-backed adapter. Session continuity, tool parking, and feed
+ * planning live here; chunk synthesis lives in the session's consumer.
+ */
+export declare class QoderAdapter extends LlmAdapter {
+    /**
+     * The options as given, read where they are used rather than copied here.
+     *
+     * A `.volatile()` field is a live cell DSH updates in place, and such an edit
+     * does not restart the plugin, so a value captured in the constructor would
+     * stay frozen for the lifetime of the process (see `src/live.ts`).
+     */
+    private readonly options;
+    private readonly sessions;
+    private readonly catalog;
+    private readonly usage;
+    private readonly readImage;
+    private readonly imagePath;
+    private readonly brand;
+    /**
+     * Memoized `Set` view of the disabled-model list.
+     *
+     * `updateVolatile` stores the freshly parsed array, so identity changes only
+     * when the value does: caching on that identity keeps the per-model lookup a
+     * hash probe instead of rebuilding a set per call, with no staleness.
+     */
+    private disabledCache;
+    /**
+     * The last window each route resolved to, plus what the model advertised.
+     *
+     * Reused only when a live entry is missing. Without it a failed refresh fell
+     * back to the static 200K, so a 1M session suddenly declared 200K: the ring
+     * denominator changed and the compaction engine budgeted against 200K,
+     * compacting a history that was still only ~10% of the real window.
+     */
+    private readonly knownWindows;
+    /**
+     * Last verified image capability per route.
+     *
+     * A missed catalog refresh used to fall back to text-only, and DSH then
+     * stripped the pixels before this adapter ran: a vision model silently lost
+     * the image for that turn. Remembering the last answer keeps the declared
+     * capability stable across a transient miss.
+     */
+    private readonly knownVision;
+    constructor(options?: QoderAdapterOptions);
+    private get defaultMaxTokens();
+    private get modelContextWindows();
+    private get disabledModels();
+    private get modelAliases();
+    private get defaultReasoningEffort();
+    private get displayName();
+    providerInfo(provider: string): LlmProviderInfo;
+    /**
+     * Whether one catalog entry is enabled for the picker.
+     *
+     * Only the user's off-switch is consulted: a model the account adds later
+     * appears enabled by default, which a stored allow-list could not do.
+     */
+    private isVisible;
+    /**
+     * The user's chosen window for one catalog id, honouring aliases.
+     *
+     * A window may be stored under either the Qoder id or a harness-side alias,
+     * so both spellings are checked before giving up.
+     */
+    private windowOverride;
+    /**
+     * The live catalog as the page renders it.
+     *
+     * Unlike {@link listModels}, this is not filtered by the user's on/off
+     * choices: the page must show a switched-off model in order to switch it
+     * back on.
+     *
+     * @returns live catalog entries in upstream order.
+     */
+    describeCatalog(): Promise<Awaited<ReturnType<QoderModelCatalog['liveModels']>>>;
+    /** Forget the cached catalog; the next read asks the CLI again. */
+    invalidateCatalog(): void;
+    /** Why the last catalog refresh failed, for the settings page's guidance. */
+    catalogError(): string | undefined;
+    /**
+     * Read the account's quota and usage, as the Qoder clients display it.
+     *
+     * @param fresh - ignore the cached reading.
+     */
+    usageInfo(fresh?: boolean): Promise<UsageSnapshot>;
+    /** Forget the cached quota reading; the next read asks the CLI again. */
+    invalidateUsage(): void;
+    /**
+     * Forget everything that was read under the account that just left.
+     *
+     * Signing in or out replaces the credentials on disk, but the SDK daemon and
+     * every warm session loaded the old ones when they started, and the catalog
+     * and quota caches describe that same old account. Signing out has to drop
+     * the sessions; signing in has to drop all four, or the page keeps showing
+     * the previous account until the process restarts.
+     */
+    resetAccount(): void;
+    /** Whether the user switched one model off. */
+    isModelDisabled(id: string): boolean;
+    /** The stored disabled-model set, as a list for rewriting the field. */
+    disabledModelIds(): readonly string[];
+    /**
+     * The user's window for one model, when the provider accepts it.
+     *
+     * A stored choice the model does not advertise is not a real choice: the CLI
+     * ignores it and keeps its own window, so publishing it would only make the
+     * meter divide by a capacity the route never runs with. Until the catalog
+     * has answered once the choice is trusted (there is nothing to check yet).
+     */
+    contextWindowFor(id: string): number | undefined;
+    /** The window this route publishes, remembering it for catalog misses. */
+    private declaredWindow;
+    /** The stored per-model window map, for rewriting the field. */
+    modelWindowChoices(): Readonly<Record<string, number>>;
+    listModels(provider: string): Promise<readonly LlmModelInfo[]>;
+    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
+    /**
+     * Bind one resolution generation to its dispatch, as the seam requires of a
+     * dynamic adapter: the live catalog and the CLI login can change between the
+     * harness preparing a call and the inner session running it, and a turn must
+     * not mix one generation's declared capabilities with another's endpoint.
+     */
+    prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;
+    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
+    /** Resolve the exact route once and derive the capability facts from it. */
+    private capture;
+    private dispatch;
+    private firstTurn;
+    /** Image references carried by a message tail, skipping assistant content. */
+    private resolveTurnImages;
+    /** Resolve image references into base64 request bytes; absent reader → none. */
+    private resolveImages;
+    /**
+     * Turn a feed into channel content. A text feed passes through; a non-vision
+     * feed flattens to the harness's own image handle text; an image the host
+     * could not read keeps a note naming what was dropped, so the inner model
+     * still knows the attachment was there.
+     */
+    private buildFeed;
+    /**
+     * Drop every warm inner session without unloading the plugin.
+     *
+     * Signing out has to invalidate them: each holds a CLI process that already
+     * loaded its credentials, so it would keep answering as the account that was
+     * just signed out. The next turn starts a fresh process, which then reports
+     * the signed-out state honestly.
+     */
+    closeSessions(): void;
+    /** Tear down every warm inner session (plugin dispose). */
+    close(): void;
+}
+interface ContinuationPlan {
+    /** Feed for the inner session this turn, or null for a pure continuation. */
+    feed: Feed | null;
+    /** Whether the warm session must be rebuilt (history diverged past repair). */
+    rebuild: boolean;
+}
+/**
+ * Decide what to feed on a continuation request. The previous list must be a
+ * prefix (same length growth, index 0 untouched, at most two in-place
+ * mutations — the host refreshes runtime-context snapshots in place every
+ * turn). Tail tool-result messages were already resolved into parked handlers
+ * and never feed; fresh user turns and mutated messages do.
+ */
+export declare function planContinuation(previous: readonly RequestMessage[], current: readonly RequestMessage[]): ContinuationPlan;
+export {};

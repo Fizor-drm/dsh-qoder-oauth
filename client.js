@@ -1,0 +1,3178 @@
+/**
+ * dsh-qoder-oauth — browser half.
+ *
+ * Contributes one top-level settings section per enabled provider (`qoder-cn`,
+ * `qoder-intl`, `codebuddy`), each showing its account card and then the model
+ * list: every model the account exposes, with an on/off switch and a
+ * context-window choice, plus a collapsed "advanced" area holding the scalars
+ * worth reaching without editing YAML. The plugin manager's page for this
+ * bundle carries the switches that decide which of those sections exist.
+ *
+ * The model list cannot come from the config form: it is fetched live from the
+ * provider. So the page reads `GET <prefix>/models`, which joins that live
+ * catalog with the user's stored choices, while every change goes back through
+ * the host's own config form. The host owns the catalog, so the page never
+ * derives state the adapter does not share.
+ *
+ * The page can also start the CLI helper shipped with this package
+ * (`POST <prefix>/setup`, then `GET <prefix>/setup` for its output): installing
+ * and signing into qoderclicn is a local action a browser cannot perform.
+ *
+ * Rendering from the schema-driven form alone would be wrong here: the useful
+ * controls depend on rows that only exist at runtime.
+ *
+ * Hand-written ModuleLoader bundle: no build step, no dependency beyond the
+ * `react` the shell already provides. Colour comes from theme variables so the
+ * page survives a scheme switch.
+ */
+
+window.__ModuleLoader__.load({
+  id: 'dsh-qoder-oauth',
+  factory: require => {
+    const module = { exports: {} }
+    const exports = module.exports
+    const React = require('react')
+    const { createElement: h, useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore } = React
+
+    /** The plugin's config namespace — must equal the profile row id. */
+    const NS = 'llm-qoder-cn'
+    const inject = ['slots', 'locale', 'configForms']
+    const QODER_LOGO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAxdSURBVHhe5VsJcFXlFc7Oy85ONiAQQMGALFKkrFqLtIBsOqAQQoGOVruOsoNBBStW9qVCWVo1UKEW0lrGBCF0EhTGwoDsEAlLoJClKe/lbQFyOt9599ze3DzuW0gCgTNz5iX33v+/5/v+85///MsNCPBSysvLGzscjtEOh2OV3W7Ps1qt31kslhKLxVJ2j7UEtlit1jzYBhthq95+v8Vut7dzOp1LHQ7HVdLIrVu3qLKykpxO5z1V2ABbtAJbnU7nkvLy8nZ6PF4LEQU6HI45TqfTjEpv3rxJFoulQShshcB2h8MxF1j0+AyltLQ00eFw5CqVkNlsrvGS+11hM2xXPCIXmPQ43UpxcXFHp9N5HgX1lTZUVRryPLDp8VaT4uLieLvdfgEFGmKr30mBBQJswKjHzUJEQRaLJe9BAy8qJFRUVABjkB5/gNlsnvMguf2dVGng2dXA22y21jabzYagoS9wN1pRUcHDlDvB0GW1WmuUqWsFRmAFZm3rL4NRteX6t27fZpBVVVV0obCQsrOz6Q/r19PSJR/QqpUrafu2bXTs2DF1uLLb7TXqqCuVrmA2m5cz+KqqqmiLxVKKltI/7KtWKa0LcIvfe4+GPjuEEuLiKCQokBBmtNo4JoYGDxpIGzduJGtFBZez2Ww16qwLVXKa0tLS0pgAq9U6Ci/XP+StglGHw8EADh8+TGkTJ1BsTDSDDAwIoAhTI4qJiqTY6KhqGhURzvfxXK+ePWjrli1qd6mPrqG8Z1SAxWJZ4y8BAA83hwvPnzePoiIiGFBkuEkFCvDhjcIoONAFFqAbhYZUI0XuDRzQn7Kydip+xBG7xjtrSxXMa0DAfn8IkL5UWFjIrgwAaO3GMdEMCqAFcOvEBAY3euRI+tHQZ+nRTh0xDvE9EIEy+MX/UDzz5e7dKhH6d9eGQsxm81cIgBcQkfUPGKmAR1/v0L49AwVoAIk0NeL/Wycl0qs/e4V27txBly5eVNNSeExZWRnt3LGDnn5qMD8LMqQ8iMC10OAgen7sWDrw9ddKudolQsFcCA8o8SUACvgzZ85Qcps2SkCLZgWQ6KhImjd3DhUVXVZbEPWjX8OloRIzYMS2Tz+lPr17cz0IlkJEdKSrO5kahdHk9El09OgRtYzeJn9UwVwCAsp8Gf9R8D9lZdSzR3cN+Cj+u1tqKh08eJAN9Wb2CFIgiCGbNm6krqmPcT1hIcEqEQiWuBYTHUWvvfYqnTt3zuv6jVTBXOYTAWg9CFpE2/L4e9DAAVRcXMz39eU8KYY/yI0bNzhP6NY1laIiIygmyhUkuWuFm/g9LZo3o1kzZ9Llyy4P83e26jMB4vrbt29jQ+CiAr7P93pzv4b4Y4yoyMEDB+jxbl3JFBZWbejE+yS4JiXE06JFi6ikpITL+Dpi+EwA+i1aKLVLF+6rMKZRWCjFx7Wic2fP+g0eZSQjzMvLo3EvvEAtmzdzmzuoRERHkSkslInokNKe/rx1K5f3JZHymQDI2rVr+KUwQqL1Jx9/7Dd4qfffV6/S1ClTKDQkhOvU5hFQ/I/cAbEBHiDkgAjJMufOme0TCT4RgEoRsHr16E4hQUHc+hivkepiWPMnc5N4kpu7lzqkpDAIBDy9q0ObNo6lRzp2oNQunTmnkMRJcggJlAvfeZvr1L/LnfpEAMbg3Tk5DB4vjYmKoNDgYMrJzvb6hVoV8FsyMynCZGJAACItDkDJbdvQtClT2MNOHD/Ofb28vJwuXbpEn3/+dxo7ZoyaakuQDA4Kot1KAuXJI30iAPLG66+r7g8i+vV9kiqdTr9aX8AHBwZyX9aCh+I9mzdv4ucgGPsRgzBcaqfXmGGCQCEBhPR9sg/Z7HaPXcFrAgDQ6azkVBYGi4EL3/be3URlJMndu5fCTSYVvMur/h/0UH9m5ieG9UsO8fu1a9WUWuJSVlaWYVmo1wTgHsbcNkmJagAKDQlWc3X980aKaH/lyhVq3y6ZgpWRBPWBCPRzIQEgPvroTx7rRysjBj3z9FNcn5SdMnmyx7JeE3D79m06dOgQxUZFct+Eu7Vq0ZwzMl+yMen3aRNeYiPF7fH37JkzaeiQIWoq7C0BUMimTRvV7omRAhklhmyjbuA1AZB9ubncStJamABdv3aN+6X++TspZNeuf7jmC5okavSokXzvh8/8gIOhrwSggY4eOaIGTwTDFs2a0qlTpwwbyCcCcvfsUefw+MV0FlHZWwLQXxG8Bg8cwP2Vk6jQUGqTlERXior4HQP79/OLANiObpXcpjV3UZALL92fn29Y3jcC9u69KwIg2V98wf1U288RxcXIJ3r24Ckw7oMkrBsaARCFDbAFNmlt3Ltnj2H5eifgJ+npaj9FDoGkCn0ULoyxHQmOtCC62T/37TMEIHonAmCzUfl6IwB1X79+ndont2Vg0vrLl/FCNAuSLIwsqD/CFEYJca2o8Px5mbMb6n1PACQnJ1t1bwSpZk0a0+nTp9VJ0Izp01XvQK4xaEB/ciqLKPr69NogCFiy5INqABEMAR4tjPRWjBfveHP+fEPjtdogCPjlL36uEoDfV15+ma9D1q5erd6TYexf33zDsUFflzutdwLQjzt1SKHi69e9JiBtwoRqBCzIyODrV69e5XVFDImSF4wYPoyzO28XOOqcABiDdb7oiHA1E+QgVVjoVZCCvDhuXDUCfvf+YhcxE13EADyiP8/mcnIMDdcrCEBjoFFMdUEAQAIsQMsuTxjGWQ8vEIW8NH58NQLWr/uQ/rh5M/+N+qT18RzE29aHggBkpR1T2qvZaq0SgEiMl2D6q51wzJwxw/AFonoC0Mf7fb8vjwT4G+AxBCbExzHRN2/6tuxd5wRAIbNnzVLdFQlLYnwcJzDoIkaLD3oCXGlwiAoev5gf/PWzz/hZo7rcab0QgAUJbHxGhJtUw10Ba7g6luvLiOoJ0KosZb2/2BUT9GW90XohAAqZNnWK6gXSFYYP+zGdPXuG74MMfQu6I0C8CNcyMt7kZ7xJetxpvRGAYFhUVETtktuyy2pJaN60CXeRy5cu8Uu19ekJQDnM+7HltXrVKr5vNG/3pPVGgCxn5eflUePYGHVaC8XoAIBJiQm0aNFCdbMCxkG0wyBaHltoMtnxt+VF640AUSYhP0/dFZaYANVuVqxcsYJXZSA/nTZVJQC/by1YYGicL1rvBIgnYDMDKS42LQEKAU26BZalcK1rair9Zft2mjd3LgVpFlRfHD/O0DhftN4JgIKESiX6Hz16lCanp6tBTZa7ABZ9Hdq2dRIbhmswDsZiL9HX90L1SdI9IUCr2DSB4CDD82PG8GIHiJAMD7/6rS7cX7fuQy6nHzXcKZ6x213xRETS8NogwKcDEndSkT17vuQjLnLcRQtcFIYiYJ46ddLQSCgMhSCeLFz4Dg0fNox+++676vY45L/l5bx1piXA05KY9oBEYW2dupClbwgOOw0cMIBbWxY7ReEZQYEIlim0TxkNIJgC68/+YzVpw4YN1P3xblyXKJbQZkx/gwoKCujYt99SXMsW6lwFBHhaUsN7cDwIZ4S+MnrQH5VdG7CcmZlJvXr2ZKOxKqQlAVtsMDo9LY2DJbLN48eOUX5+Pi+YTpo4kVLaJXNZ2TPQehGuAzhijHQz1NeiWRMqKDhnOFtVMO+HB/h9TM6TyskPm81K69etoy6dH2Wj0ULY2gYJkg5L3MAOkXZnGEAFNO6DCBzEQnkBjOeFVNcoM97jmoKCec1dH5T0RrGpCcHy19IlSzibdAdOVoQwkmhbW47HwIOw+YkDFFJeRhd55rEunenihQuGrQ+F8EFJHBfFsVGjXZTaUERyyQyvXbtGb721gBIT4tWWhlegNQEELRqqOV7bJDaWnhsxnP6WlcVB8fjx4/SbX/+K9ysRX1xZaQxNSkujosuXPc5QFXJKcUxYDksvh2FGhWpLOYdQtrgxnV6xYjmNfG4EdX6kE8W3asmtC2BP9OpJ6ZPSOBacPOkaLZRW42AJAdhdu3bRjh076MSJE3zN3YRM/34F67I6Py7vSbV7/WWlZfRdQQEvl2OI044oiNju+rMMkUbP6BVlahyXV7yAD9noC9SHwnA5/IAWVIys8VxtKAQfh1QDD8FnJMrnJIYu1FBVXP+On8xAHoaPpioqKtx/NCXyUH82J/JQfzgpgs9NbTbb3Afg09k5GRkZ7vu8N4IPkO12e0P8eHopPvzW4/FbtJ/P41P1++3zeXzS78/n8/8DV7mGmOF+4hsAAAAASUVORK5CYII='
+
+    // ── copy ────────────────────────────────────────────────────────────────
+    const zh = {
+      nav: 'Qoder CN',
+      title: 'Qoder CN',
+      intro: '勾选要启用的模型，并为需要的模型指定上下文窗口。改动即时生效，无需重启。',
+      loading: '正在读取模型列表…',
+      loadFailed: '读取模型列表失败',
+      retry: '重试',
+      refresh: '刷新列表',
+      refreshing: '刷新中…',
+      saveFailed: '保存失败',
+      notApplied: '服务器未报告这次改动，可能被其他窗口覆盖了，请刷新后重试',
+      timeout: '保存超时，请重试',
+      saved: '已保存',
+      saving: '保存中…',
+      enabledCount: '已启用',
+      noModels: '账号没有返回任何模型：一般是本机 qoderclicn 还没装好，或者还没登录。',
+      search: '搜索模型…',
+      onlyEnabled: '只看已启用',
+      selectAll: '全部启用',
+      selectNone: '全部关闭',
+      colEnabled: '启用',
+      windowDefault: '默认',
+      windowDefaultHint: '跟随上游声明的窗口',
+      windowFixed: '上游固定',
+      windowFixedHint: '该模型在上游只提供这一个上下文窗口，选择其它值会被上游拒绝，因此这里不提供下拉选择。',
+      vision: '读图',
+      free: '免费',
+      advanced: '高级设置',
+      advancedHint: '以下为细节参数，通常无需改动。',
+      show: '展开',
+      hide: '收起',
+      reset: '恢复默认',
+      windowWarn: '窗口越大，DSH 的自动压缩触发得越晚。若对话经常超限，请选较小的窗口。',
+      cliGroup: 'Qoder CN CLI',
+      cliHint: '插件复用本机 qoderclicn 的登录态。这里可以直接跑随包附带的配置脚本：缺 CLI 就装，未登录就拉起浏览器登录。',
+      cliRun: '一键配置',
+      cliLogin: '重新登录',
+      cliRunning: '正在执行，输出持续刷新…',
+      cliStartFailed: '无法启动配置脚本',
+      cliExitOk: '配置脚本执行完成',
+      cliExitFail: '配置脚本未通过，退出码',
+      cliShowLog: '查看输出',
+      cliHideLog: '收起输出',
+      cliUninstall: '卸载 CLI',
+      cliUninstallConfirm: '确定要卸载本机的 Qoder CLI 吗？卸载后需要重新安装才能继续使用，登录凭证会保留。',
+      cliUninstalling: '正在卸载…',
+      cliUninstallOk: 'CLI 已卸载',
+      cliInstall: '安装 CLI',
+      cliInstalled: '已安装',
+      cliCancel: '取消',
+      cliCancelling: '正在取消…',
+      cliCancelled: '已取消，可以重新操作',
+      cliLogout: '退出登录',
+      cliLogoutConfirm: '确定要退出当前 Qoder 账号吗？退出后会关闭已打开的会话并清空额度，需要重新登录才能继续使用；CLI 本身不会被卸载。',
+      cliLoggingOut: '正在退出登录…',
+      cliLogoutOk: '已退出登录',
+      cliVersionMismatch: 'CLI 版本与插件不匹配：本机',
+      cliVersionMismatchTail: '，插件需要',
+      intlNav: 'Qoder 国际版',
+      intlTitle: 'Qoder 国际版',
+      intlIntro: '国际版账户（qoder.com）的模型与额度。勾选要启用的模型，并为需要的模型指定上下文窗口。改动即时生效，无需重启。',
+      intlNoModels: '国际版账号没有返回任何模型：一般是本机 qodercli 还没装好，或者还没登录。',
+      intlCliGroup: 'Qoder 国际版 CLI',
+      intlCliHint: '插件复用本机 qodercli 的登录态。这里可以直接跑随包附带的配置脚本：缺 CLI 就装，未登录就拉起浏览器登录。',
+      usageTitle: '额度',
+      usageLoading: '正在读取额度…',
+      usageRefresh: '刷新额度',
+      usageUnavailable: '无法读取额度',
+      usageRetry: '重试',
+      usageAccount: '账号',
+      usagePlan: '套餐',
+      usageUsed: '已用',
+      usageRemaining: '剩余',
+      usageCredits: '积分',
+      usagePlanQuota: '套餐额度',
+      usageAddOn: '加量包',
+      usageOrgPackage: '组织资源包',
+      usageExpires: '到期',
+      usageNever: '长期有效',
+      usageDetail: '用量明细',
+      usageUpgrade: '升级套餐',
+      usageExceeded: '额度已用完',
+      usageUpdated: '更新于',
+      usageUnknownPlan: '未知套餐',
+      usageStale: '显示上次读数，刷新失败',
+      usageCliMissing: '未检测到本机 CLI，安装并登录后才会显示额度。',
+      usageSignedOut: '已退出登录，重新登录后显示额度。',
+      modelsSignedOut: '已退出登录，重新登录后才会显示模型。',
+      pluginOptionsTitle: '启用的版本',
+      pluginOptionsHint: '关闭后，对应设置页、模型列表与模型分组都会移除；已保存的模型选择保留，重新打开即可恢复。',
+      pluginOptionsOn: '显示中',
+      pluginOptionsOff: '已关闭',
+      pluginOptionsReadOnly: '当前配置不可写',
+      pluginOptionsRejected: '宿主拒绝了这次改动；若刚更新过插件，请重启 DSH 后再试',
+      codebuddyNav: 'CodeBuddy',
+      codebuddyTitle: 'CodeBuddy',
+      codebuddyIntro: '腾讯 CodeBuddy 账户的模型。请先在下方选择登录区域并登录，再勾选要启用的模型。',
+      codebuddyNoModels: 'CodeBuddy 账号没有返回任何模型：请确认已选择登录区域并完成登录。',
+      codebuddyAuthTitle: '登录',
+      codebuddyAuthHint: 'CodeBuddy 分国际版与国内版，两边账号与模型目录独立。企业域名登录不在本插件支持范围内。',
+      codebuddyRegionGlobal: '国际版（codebuddy.ai）',
+      codebuddyRegionCn: '国内版（copilot.tencent.com）',
+      codebuddyRegionLabel: '登录区域',
+      codebuddyLogin: '登录',
+      codebuddyLogout: '退出登录',
+      codebuddyLoggingIn: '请在浏览器中完成登录…',
+      codebuddyLoginPrompt: '登录后这里会显示账号与额度信息。',
+      codebuddyModelsHint: '请先登录 CodeBuddy，登录后才会读取并显示可用模型。',
+      codebuddyRegionMismatch: '宿主返回的模型列表不属于当前区域，请刷新页面后重试。',
+      codebuddyLoginStarted: '已打开浏览器，完成登录后这里会自动更新。',
+      codebuddyLoginFailed: '登录失败',
+      codebuddyOpenUrl: '手动打开登录页',
+      codebuddyLoggedOut: '已退出登录',
+      codebuddyNotLoggedIn: '未登录',
+      codebuddySignedIn: '已登录',
+      codebuddyAccountUnknown: '账号信息暂不可用',
+      codebuddyNoQuota: '暂时无法读取额度。',
+      codebuddyQuotaFailed: '额度读取失败',
+      codebuddyQuotaTitle: '积分额度',
+      codebuddyQuotaPackages: '积分包',
+      codebuddyQuotaExpires: '最近到期',
+      codebuddyQuotaPackUsage: '已用 / 总额',
+      codebuddyQuotaPackDetail: '详细信息',
+      codebuddyQuotaPackCollapse: '收起',
+      codebuddyConfirmLogout: '确定要退出当前区域的 CodeBuddy 登录吗？',
+      minimaxNav: 'MiniMax Code',
+      minimaxTitle: 'MiniMax Code',
+      minimaxIntro: '通过 Agent Client Protocol 接入 MiniMax Code（mcode acp）。选择登录区域并完成登录后，才会读取模型目录。',
+      minimaxNoModels: 'MiniMax Code 账号没有返回任何模型：请确认 CLI 已安装、已选择区域并完成登录。',
+      minimaxAuthTitle: '登录与 CLI',
+      minimaxAuthHint: 'MiniMax Code 分国内站与国际站，模型目录独立。登录由 mcode CLI 完成，凭据保存在本机；CLI 同一时间只允许一个站点登录，切换前请先在另一站点退出登录。',
+      minimaxRegionGlobal: '国际站（account.minimax.io）',
+      minimaxRegionCn: '国内站（account.minimax.cn）',
+      minimaxRegionLabel: '登录区域',
+      minimaxLogin: '登录',
+      minimaxLogout: '退出登录',
+      minimaxLoggingIn: '请在浏览器中完成授权…',
+      minimaxLoginPrompt: '登录后这里会显示账号状态与可用模型。',
+      minimaxModelsHint: '请先安装并登录 MiniMax Code，登录后才会读取并显示可用模型。',
+      minimaxRegionMismatch: '宿主返回的模型列表不属于当前区域，请刷新页面后重试。',
+      minimaxLoginStarted: '已打开浏览器，完成授权后这里会自动更新。',
+      minimaxLoginFailed: '登录失败',
+      minimaxOpenUrl: '手动打开授权页',
+      minimaxNotLoggedIn: '未登录',
+      minimaxSignedIn: '已登录',
+      minimaxConfirmLogout: '确定要退出当前区域的 MiniMax Code 登录吗？',
+      minimaxCliGroup: 'MiniMax Code CLI',
+      minimaxCliHint: '安装的是 @minimax-ai/code（含 native SQLite）。普通 npm 安装会被 npm 12 拦截安装脚本，导致 mcode 无法启动，这里使用官方要求的参数。',
+      minimaxCliInstalled: '已安装',
+      minimaxCliMissing: '未安装',
+      minimaxCliInstall: '安装 / 更新 CLI',
+      minimaxCliUninstall: '卸载 CLI',
+      minimaxCliInstalling: '正在安装…',
+      minimaxCliUninstalling: '正在卸载…',
+      minimaxConfirmUninstall: '确定要卸载全局 MiniMax Code CLI 吗？登录态会保留。',
+      minimaxCliFailed: 'CLI 操作失败',
+      minimaxShowOutput: '查看输出',
+      minimaxHideOutput: '收起输出',
+      minimaxNoUsage: '登录后会显示账号、套餐与剩余额度。',
+      minimaxCliRequired: '请先安装 MiniMax Code CLI，再登录。',
+      minimaxPlanExpires: '套餐到期',
+      minimaxTokenRemaining: '访问令牌剩余 {n} 分钟',
+      minimaxTokenRemainingHours: '访问令牌剩余 {n} 小时',
+      minimaxTokenExpired: '访问令牌已过期',
+      minimaxTokenRenew: 'CLI 会在下次调用时自动续期，无需重新登录',
+      minimaxAccount: '账号',
+      minimaxAccountUnknown: '未知账号',
+      minimaxPlan: '当前套餐',
+      minimaxPlanTokenPlan: 'Token Plan',
+      minimaxPlanCredits: '积分',
+      minimaxPlanFree: '免费',
+      minimaxCredits: '剩余积分',
+      minimaxCreditsPurchased: '其中购买',
+      minimaxCreditsFree: '其中赠送',
+      minimaxQuotaRemaining: '剩余',
+      minimaxQuotaReset: '重置于',
+      minimaxQuotaUnlimited: '不限',
+      minimaxQuotaNone: '当前账号没有 Token Plan 额度窗口。',
+      minimaxRegionBlockedShort: '区域不可用',
+      minimaxIpBlocked: '本机 IP 不在 MiniMax 国际站的服务区域，国际站已拒绝连接。请切换到国内站，或更换网络后重试。',
+      minimaxSwitchToCn: '切换到国内站',
+      minimaxSwitchToGlobal: '切换到国际站',
+      minimaxUsageLoading: '正在读取账号与额度…',
+      minimaxUsageFailed: '额度读取失败',
+      usageCampaign: '活动赠送额度',
+      usageCampaignHint: '活动赠送的额度，按资源包分别计算有效期。',
+      usageTotal: '合计',
+      campaignPatTitle: '活动额度 PAT',
+      campaignPatHint: '要显示 Qoder 活动赠送额度，请设置 Personal Access Token。它只用于读取活动额度，与登录凭据分开保存。',
+      campaignPatPlaceholder: 'Personal Access Token',
+      campaignPatSave: '保存',
+      campaignPatDelete: '删除',
+      campaignPatConfigured: '已设置',
+      campaignPatNotConfigured: '未设置',
+      campaignPatSaved: '已保存',
+      campaignPatDeleted: '已删除',
+      campaignPatSaveFailed: '无法验证 PAT',
+      campaignPatLink: '生成 PAT',
+      campaignPatRegion: 'Qoder 国际版（qoder.com）',
+      accountReveal: '点击显示用户名',
+      accountHide: '点击隐藏用户名',
+      advancedFields: {
+        displayName: '分组名称',
+        maxSessions: '并发会话数',
+        modelCacheTtlSeconds: '模型列表缓存（秒）',
+        defaultReasoningEffort: '默认思考档位',
+        defaultMaxTokens: '默认输出上限',
+        toolResultTimeoutSeconds: '工具结果等待（秒）',
+        catalogFetchTimeoutSeconds: '模型列表超时（秒）',
+        abortGraceSeconds: '中断宽限（秒）',
+        coldMaxTurns: '旁路请求轮次',
+        modelAliases: '模型别名',
+        intlDisplayName: '国际版分组名称',
+        intlModelAliases: '国际版模型别名',
+        codebuddyDisplayName: 'CodeBuddy 分组名称',
+        codebuddyModelAliases: 'CodeBuddy 模型别名',
+        minimaxDisplayName: 'MiniMax 分组名称',
+        minimaxModelAliases: 'MiniMax 模型别名',
+      },
+    }
+    const en = {
+      nav: 'Qoder CN',
+      title: 'Qoder CN',
+      intro: 'Tick the models you want available and set a context window where needed. Changes apply immediately.',
+      loading: 'Loading models…',
+      loadFailed: 'Could not load the model list',
+      retry: 'Retry',
+      refresh: 'Refresh',
+      refreshing: 'Refreshing…',
+      saveFailed: 'Save failed',
+      notApplied: 'The host did not report this change; another window may have overwritten it. Refresh and retry.',
+      timeout: 'Save timed out; please retry',
+      saved: 'Saved',
+      saving: 'Saving…',
+      enabledCount: 'enabled',
+      noModels: 'The account returned no models - usually qoderclicn is not installed on this machine, or not signed in.',
+      search: 'Search models…',
+      onlyEnabled: 'Enabled only',
+      selectAll: 'Enable all',
+      selectNone: 'Disable all',
+      colEnabled: 'On',
+      windowDefault: 'Default',
+      windowDefaultHint: "Follow upstream's declared window",
+      windowFixed: 'fixed upstream',
+      windowFixedHint: 'This model offers exactly one context window upstream; any other value is rejected, so there is no selector here.',
+      vision: 'Vision',
+      free: 'Free',
+      advanced: 'Advanced',
+      advancedHint: 'Detail parameters; rarely changed.',
+      show: 'Show',
+      hide: 'Hide',
+      reset: 'Reset',
+      windowWarn: 'A larger window delays DSH\u2019s auto-compaction. Pick a smaller one if conversations overflow.',
+      cliGroup: 'Qoder CN CLI',
+      cliHint: 'The plugin reuses this machine\u2019s qoderclicn sign-in. Run the bundled helper from here: it installs the CLI when missing and opens the browser sign-in when signed out.',
+      cliRun: 'Configure',
+      cliLogin: 'Re-login',
+      cliRunning: 'Running, output refreshes…',
+      cliStartFailed: 'Could not start the helper',
+      cliExitOk: 'Helper finished',
+      cliExitFail: 'Helper failed with exit code',
+      cliShowLog: 'Show output',
+      cliHideLog: 'Hide output',
+      cliUninstall: 'Uninstall CLI',
+      cliUninstallConfirm: 'Uninstall the Qoder CLI from this machine? It must be installed again to keep using this edition. Sign-in files are kept.',
+      cliUninstalling: 'Uninstalling…',
+      cliUninstallOk: 'CLI uninstalled',
+      cliInstall: 'Install CLI',
+      cliInstalled: 'Installed',
+      cliCancel: 'Cancel',
+      cliCancelling: 'Cancelling…',
+      cliCancelled: 'Cancelled — you can start again',
+      cliLogout: 'Sign out',
+      cliLogoutConfirm: 'Sign out of the current Qoder account? Open sessions will be closed and quota cleared; you will need to sign in again. The CLI itself stays installed.',
+      cliLoggingOut: 'Signing out…',
+      cliLogoutOk: 'Signed out',
+      cliVersionMismatch: 'CLI version does not match the plugin: this machine has',
+      cliVersionMismatchTail: 'but the plugin needs',
+      intlNav: 'Qoder International',
+      intlTitle: 'Qoder International',
+      intlIntro: 'Models and quota for the international account (qoder.com). Tick the models you want available and set a context window where needed. Changes apply immediately.',
+      intlNoModels: 'The international account returned no models - usually qodercli is not installed on this machine, or not signed in.',
+      intlCliGroup: 'Qoder International CLI',
+      intlCliHint: 'The plugin reuses this machine\u2019s qodercli sign-in. Run the bundled helper from here: it installs the CLI when missing and opens the browser sign-in when signed out.',
+      usageTitle: 'Quota',
+      usageLoading: 'Reading quota…',
+      usageRefresh: 'Refresh quota',
+      usageUnavailable: 'Could not read the quota',
+      usageRetry: 'Retry',
+      usageAccount: 'Account',
+      usagePlan: 'Plan',
+      usageUsed: 'Used',
+      usageRemaining: 'Remaining',
+      usageCredits: 'credits',
+      usagePlanQuota: 'Plan quota',
+      usageAddOn: 'Add-on package',
+      usageOrgPackage: 'Organization package',
+      usageExpires: 'Expires',
+      usageNever: 'No expiry',
+      usageDetail: 'Usage details',
+      usageUpgrade: 'Upgrade',
+      usageExceeded: 'Quota exhausted',
+      usageUpdated: 'Updated',
+      usageUnknownPlan: 'Unknown plan',
+      usageStale: 'Showing the last reading; refresh failed',
+      usageCliMissing: 'This machine has no CLI for this edition; quota appears after it is installed and signed in.',
+      usageSignedOut: 'Signed out. Sign in again to see quota.',
+      modelsSignedOut: 'Signed out. Sign in again to see the models.',
+      pluginOptionsTitle: 'Enabled editions',
+      pluginOptionsHint: 'Turning one off removes its settings page, model list, and model group. Saved model choices are kept, so turning it back on restores them.',
+      pluginOptionsOn: 'Shown',
+      pluginOptionsOff: 'Off',
+      pluginOptionsReadOnly: 'This configuration is read-only',
+      pluginOptionsRejected: 'The host rejected this change; if you just updated the plugin, restart DSH and retry',
+      codebuddyNav: 'CodeBuddy',
+      codebuddyTitle: 'CodeBuddy',
+      codebuddyIntro: 'Models for your Tencent CodeBuddy account. Choose a login region below and sign in before enabling models.',
+      codebuddyNoModels: 'The CodeBuddy account returned no models: make sure a region is selected and the browser login completed.',
+      codebuddyAuthTitle: 'Sign in',
+      codebuddyAuthHint: 'CodeBuddy has independent international and mainland accounts with their own model catalogs. Enterprise-domain login is out of scope for this plugin.',
+      codebuddyRegionGlobal: 'International (codebuddy.ai)',
+      codebuddyRegionCn: 'Mainland (copilot.tencent.com)',
+      codebuddyRegionLabel: 'Login region',
+      codebuddyLogin: 'Sign in',
+      codebuddyLogout: 'Sign out',
+      codebuddyLoggingIn: 'Finish the sign-in in your browser…',
+      codebuddyLoginPrompt: 'Sign in to see the account and quota here.',
+      codebuddyModelsHint: 'Sign in to CodeBuddy first; the model catalog is read only after sign-in.',
+      codebuddyRegionMismatch: 'The host answered with the other region\'s models; reload the page and try again.',
+      codebuddyLoginStarted: 'Browser opened; this card updates when the login completes.',
+      codebuddyLoginFailed: 'Sign-in failed',
+      codebuddyOpenUrl: 'Open the sign-in page',
+      codebuddyLoggedOut: 'Signed out',
+      codebuddyNotLoggedIn: 'Not signed in',
+      codebuddySignedIn: 'Signed in',
+      codebuddyAccountUnknown: 'Account details are unavailable',
+      codebuddyNoQuota: 'The quota is temporarily unavailable.',
+      codebuddyQuotaFailed: 'Could not read the quota',
+      codebuddyQuotaTitle: 'Credits',
+      codebuddyQuotaPackages: 'Credit packages',
+      codebuddyQuotaExpires: 'Earliest expiry',
+      codebuddyQuotaPackUsage: 'used / total',
+      codebuddyQuotaPackDetail: 'Details',
+      codebuddyQuotaPackCollapse: 'Collapse',
+      codebuddyConfirmLogout: 'Sign out of CodeBuddy for the selected region?',
+      minimaxNav: 'MiniMax Code',
+      minimaxTitle: 'MiniMax Code',
+      minimaxIntro: 'MiniMax Code over the Agent Client Protocol (mcode acp). Choose a login region and sign in before the catalog is read.',
+      minimaxNoModels: 'The MiniMax Code account returned no models: make sure the CLI is installed, a region is selected, and the login completed.',
+      minimaxAuthTitle: 'Sign in and CLI',
+      minimaxAuthHint: 'MiniMax Code has independent mainland and international catalogs. Login runs through the mcode CLI and the credential stays on this machine; the CLI allows one region at a time, so sign out of the other before switching.',
+      minimaxRegionGlobal: 'International (account.minimax.io)',
+      minimaxRegionCn: 'Mainland (account.minimax.cn)',
+      minimaxRegionLabel: 'Login region',
+      minimaxLogin: 'Sign in',
+      minimaxLogout: 'Sign out',
+      minimaxLoggingIn: 'Finish the authorization in your browser…',
+      minimaxLoginPrompt: 'Sign in to see the account state and available models.',
+      minimaxModelsHint: 'Install and sign in to MiniMax Code first; the model catalog is read only after sign-in.',
+      minimaxRegionMismatch: 'The host answered with the other region\'s models; reload the page and try again.',
+      minimaxLoginStarted: 'Browser opened; this card updates when the login completes.',
+      minimaxLoginFailed: 'Sign-in failed',
+      minimaxOpenUrl: 'Open the authorization page',
+      minimaxNotLoggedIn: 'Not signed in',
+      minimaxSignedIn: 'Signed in',
+      minimaxConfirmLogout: 'Sign out of MiniMax Code for the selected region?',
+      minimaxCliGroup: 'MiniMax Code CLI',
+      minimaxCliHint: 'Installs @minimax-ai/code (including its native SQLite dependency). npm 12 blocks install scripts by default, which leaves mcode unable to start; the official flags are used here.',
+      minimaxCliInstalled: 'Installed',
+      minimaxCliMissing: 'Not installed',
+      minimaxCliInstall: 'Install / update CLI',
+      minimaxCliUninstall: 'Uninstall CLI',
+      minimaxCliInstalling: 'Installing…',
+      minimaxCliUninstalling: 'Uninstalling…',
+      minimaxConfirmUninstall: 'Uninstall the global MiniMax Code CLI? The login state is kept.',
+      minimaxCliFailed: 'CLI action failed',
+      minimaxShowOutput: 'Show output',
+      minimaxHideOutput: 'Hide output',
+      minimaxNoUsage: 'Sign in to see the account, plan and remaining quota.',
+      minimaxCliRequired: 'Install the MiniMax Code CLI before signing in.',
+      minimaxPlanExpires: 'Plan expires',
+      minimaxTokenRemaining: 'Access token: {n} min left',
+      minimaxTokenRemainingHours: 'Access token: {n} h left',
+      minimaxTokenExpired: 'Access token expired',
+      minimaxTokenRenew: 'the CLI renews it automatically on the next call; no re-login needed',
+      minimaxAccount: 'Account',
+      minimaxAccountUnknown: 'Unknown account',
+      minimaxPlan: 'Plan',
+      minimaxPlanTokenPlan: 'Token Plan',
+      minimaxPlanCredits: 'Credits',
+      minimaxPlanFree: 'Free',
+      minimaxCredits: 'Remaining credits',
+      minimaxCreditsPurchased: 'purchased',
+      minimaxCreditsFree: 'free',
+      minimaxQuotaRemaining: 'remaining',
+      minimaxQuotaReset: 'resets at',
+      minimaxQuotaUnlimited: 'Unlimited',
+      minimaxQuotaNone: 'This account has no Token Plan quota windows.',
+      minimaxRegionBlockedShort: 'Region unavailable',
+      minimaxIpBlocked: 'This machine\'s IP is outside the MiniMax International service region, so the international site refused the connection. Switch to the mainland site or change networks.',
+      minimaxSwitchToCn: 'Switch to mainland',
+      minimaxSwitchToGlobal: 'Switch to international',
+      minimaxUsageLoading: 'Reading the account and quota…',
+      minimaxUsageFailed: 'Could not read the quota',
+      usageCampaign: 'Campaign credits',
+      usageCampaignHint: 'Credits granted by a campaign; each package has its own expiry.',
+      usageTotal: 'Total',
+      campaignPatTitle: 'Campaign quota PAT',
+      campaignPatHint: 'Set a Personal Access Token to show Qoder campaign grants. It is used only for the campaign quota and stored separately from the sign-in.',
+      campaignPatPlaceholder: 'Personal Access Token',
+      campaignPatSave: 'Save',
+      campaignPatDelete: 'Delete',
+      campaignPatConfigured: 'Configured',
+      campaignPatNotConfigured: 'Not configured',
+      campaignPatSaved: 'Saved',
+      campaignPatDeleted: 'Deleted',
+      campaignPatSaveFailed: 'Could not verify the PAT',
+      campaignPatLink: 'Create a PAT',
+      campaignPatRegion: 'Qoder International (qoder.com)',
+      accountReveal: 'Click to show the user name',
+      accountHide: 'Click to hide the user name',
+      advancedFields: {
+        displayName: 'Group name',
+        maxSessions: 'Concurrent sessions',
+        modelCacheTtlSeconds: 'Catalog cache (s)',
+        defaultReasoningEffort: 'Default reasoning effort',
+        defaultMaxTokens: 'Default output cap',
+        toolResultTimeoutSeconds: 'Tool result wait (s)',
+        catalogFetchTimeoutSeconds: 'Catalog timeout (s)',
+        abortGraceSeconds: 'Abort grace (s)',
+        coldMaxTurns: 'Side-channel turns',
+        modelAliases: 'Model aliases',
+        intlDisplayName: 'International group name',
+        intlModelAliases: 'International model aliases',
+        codebuddyDisplayName: 'CodeBuddy group name',
+        codebuddyModelAliases: 'CodeBuddy model aliases',
+        minimaxDisplayName: 'MiniMax group name',
+        minimaxModelAliases: 'MiniMax model aliases',
+      },
+    }
+
+    const ja = {
+  "nav": "Qoder CN",
+  "title": "Qoder CN",
+  "intro": "使用するモデルにチェックを入れ、必要に応じてコンテキストウィンドウを指定してください。変更はすぐに反映されます。",
+  "loading": "モデル一覧を読み込み中…",
+  "loadFailed": "モデル一覧を読み込めませんでした",
+  "retry": "再試行",
+  "refresh": "一覧を更新",
+  "refreshing": "更新中…",
+  "saveFailed": "保存に失敗しました",
+  "notApplied": "サーバーが変更を確認できませんでした。別のウィンドウで上書きされた可能性があります。更新して再試行してください。",
+  "timeout": "保存がタイムアウトしました。再試行してください",
+  "saved": "保存しました",
+  "saving": "保存中…",
+  "enabledCount": "有効",
+  "noModels": "アカウントからモデルが返されませんでした。通常は本機の qoderclicn が未インストールか、未ログインです。",
+  "search": "モデルを検索…",
+  "onlyEnabled": "有効のみ",
+  "selectAll": "すべて有効化",
+  "selectNone": "すべて無効化",
+  "colEnabled": "有効",
+  "windowDefault": "既定",
+  "windowDefaultHint": "上流が宣言したウィンドウに従う",
+  "windowFixed": "上流固定",
+  "windowFixedHint": "このモデルは上流で1つのコンテキストウィンドウのみ提供します。他の値は拒否されるため、選択肢はありません。",
+  "vision": "画像",
+  "free": "無料",
+  "advanced": "詳細設定",
+  "advancedHint": "詳細パラメータです。通常は変更不要です。",
+  "show": "表示",
+  "hide": "非表示",
+  "reset": "既定に戻す",
+  "windowWarn": "ウィンドウを大きくすると DSH の自動圧縮が遅くなります。会話が上限を超える場合は小さい値を選んでください。",
+  "cliGroup": "Qoder CN CLI",
+  "cliHint": "本機の qoderclicn のログイン状態を再利用します。同梱ヘルパーをここから実行できます。CLI がなければインストールし、未ログインならブラウザのログインを開きます。",
+  "cliRun": "一括設定",
+  "cliLogin": "再ログイン",
+  "cliRunning": "実行中。出力を更新しています…",
+  "cliStartFailed": "ヘルパーを開始できませんでした",
+  "cliExitOk": "ヘルパーが完了しました",
+  "cliExitFail": "ヘルパーが失敗しました。終了コード",
+  "cliShowLog": "出力を表示",
+  "cliHideLog": "出力を隠す",
+  "cliUninstall": "CLI をアンインストール",
+  "cliUninstallConfirm": "本機の Qoder CLI をアンインストールしますか？このエディションを使い続けるには再インストールが必要です。ログイン情報は保持されます。",
+  "cliUninstalling": "アンインストール中…",
+  "cliUninstallOk": "CLI をアンインストールしました",
+  "cliInstall": "CLI をインストール",
+  "cliInstalled": "インストール済み",
+  "cliCancel": "キャンセル",
+  "cliCancelling": "キャンセル中…",
+  "cliCancelled": "キャンセルしました。再度開始できます",
+  "cliLogout": "ログアウト",
+  "cliLogoutConfirm": "現在の Qoder アカウントからログアウトしますか？開いているセッションは閉じられ、クォータはクリアされます。再度ログインが必要です。CLI 自体は残ります。",
+  "cliLoggingOut": "ログアウト中…",
+  "cliLogoutOk": "ログアウトしました",
+  "cliVersionMismatch": "CLI のバージョンがプラグインと一致しません。本機は",
+  "cliVersionMismatchTail": "ですが、プラグインが必要とするのは",
+  "intlNav": "Qoder グローバル版",
+  "intlTitle": "Qoder グローバル版",
+  "intlIntro": "グローバル版アカウント（qoder.com）のモデルとクォータです。使用するモデルにチェックを入れ、必要に応じてコンテキストウィンドウを指定してください。変更はすぐに反映されます。",
+  "intlNoModels": "グローバル版アカウントからモデルが返されませんでした。通常は本機の qodercli が未インストールか、未ログインです。",
+  "intlCliGroup": "Qoder グローバル版 CLI",
+  "intlCliHint": "本機の qodercli のログイン状態を再利用します。同梱ヘルパーをここから実行できます。CLI がなければインストールし、未ログインならブラウザのログインを開きます。",
+  "usageTitle": "クォータ",
+  "usageLoading": "クォータを読み込み中…",
+  "usageRefresh": "クォータを更新",
+  "usageUnavailable": "クォータを読み込めませんでした",
+  "usageRetry": "再試行",
+  "usageAccount": "アカウント",
+  "usagePlan": "プラン",
+  "usageUsed": "使用済み",
+  "usageRemaining": "残り",
+  "usageCredits": "クレジット",
+  "usagePlanQuota": "プラン枠",
+  "usageAddOn": "追加パッケージ",
+  "usageOrgPackage": "組織パッケージ",
+  "usageExpires": "有効期限",
+  "usageNever": "期限なし",
+  "usageDetail": "使用量の詳細",
+  "usageUpgrade": "アップグレード",
+  "usageExceeded": "クォータを使い切りました",
+  "usageUpdated": "更新",
+  "usageUnknownPlan": "不明なプラン",
+  "usageStale": "前回の値を表示中。更新に失敗しました",
+  "usageCliMissing": "このエディションの CLI が本機にありません。インストールしてログインするとクォータが表示されます。",
+  "usageSignedOut": "ログアウト済みです。クォータを見るには再ログインしてください。",
+  "modelsSignedOut": "ログアウト済みです。モデルを見るには再ログインしてください。",
+  "pluginOptionsTitle": "有効なエディション",
+  "pluginOptionsHint": "オフにすると、その設定ページ・モデル一覧・モデルグループが削除されます。保存済みのモデル選択は保持され、再度オンにすると復元されます。",
+  "pluginOptionsOn": "表示",
+  "pluginOptionsOff": "オフ",
+  "pluginOptionsReadOnly": "この設定は読み取り専用です",
+  "pluginOptionsRejected": "ホストが変更を拒否しました。プラグインを更新した直後なら、DSH を再起動して再試行してください",
+  "codebuddyNav": "CodeBuddy",
+  "codebuddyTitle": "CodeBuddy",
+  "codebuddyIntro": "Tencent CodeBuddy アカウントのモデルです。下でログイン地域を選び、ログインしてからモデルを有効化してください。",
+  "codebuddyNoModels": "CodeBuddy アカウントからモデルが返されませんでした。地域を選択し、ブラウザでのログインが完了しているか確認してください。",
+  "codebuddyAuthTitle": "ログイン",
+  "codebuddyAuthHint": "CodeBuddy は国際版と中国本土版でアカウントとモデル一覧が分かれています。企業ドメインのログインはこのプラグインの対象外です。",
+  "codebuddyRegionGlobal": "国際版（codebuddy.ai）",
+  "codebuddyRegionCn": "中国本土版（copilot.tencent.com）",
+  "codebuddyRegionLabel": "ログイン地域",
+  "codebuddyLogin": "ログイン",
+  "codebuddyLogout": "ログアウト",
+  "codebuddyLoggingIn": "ブラウザでログインを完了してください…",
+  "codebuddyLoginPrompt": "ログインするとここにアカウントとクォータが表示されます。",
+  "codebuddyModelsHint": "先に CodeBuddy にログインしてください。ログイン後にモデル一覧が読み込まれます。",
+  "codebuddyRegionMismatch": "ホストが別地域のモデルを返しました。ページを再読み込みして再試行してください。",
+  "codebuddyLoginStarted": "ブラウザを開きました。ログインが完了するとこのカードが更新されます。",
+  "codebuddyLoginFailed": "ログインに失敗しました",
+  "codebuddyOpenUrl": "ログインページを開く",
+  "codebuddyLoggedOut": "ログアウトしました",
+  "codebuddyNotLoggedIn": "未ログイン",
+  "codebuddySignedIn": "ログイン済み",
+  "codebuddyAccountUnknown": "アカウント情報を取得できません",
+  "codebuddyNoQuota": "クォータは一時的に利用できません。",
+  "codebuddyQuotaFailed": "クォータを読み込めませんでした",
+  "codebuddyQuotaTitle": "クレジット",
+  "codebuddyQuotaPackages": "クレジットパッケージ",
+  "codebuddyQuotaExpires": "最短の有効期限",
+  "codebuddyQuotaPackUsage": "使用済み / 合計",
+  "codebuddyQuotaPackDetail": "詳細",
+  "codebuddyQuotaPackCollapse": "折りたたむ",
+  "codebuddyConfirmLogout": "選択した地域の CodeBuddy からログアウトしますか？",
+  "minimaxNav": "MiniMax Code",
+  "minimaxTitle": "MiniMax Code",
+  "minimaxIntro": "Agent Client Protocol（mcode acp）経由の MiniMax Code です。ログイン地域を選び、ログインしてからモデル一覧を読み込んでください。",
+  "minimaxNoModels": "MiniMax Code アカウントからモデルが返されませんでした。CLI のインストール、地域の選択、ログイン完了を確認してください。",
+  "minimaxAuthTitle": "ログインと CLI",
+  "minimaxAuthHint": "MiniMax Code は中国本土版と国際版でモデル一覧が分かれています。ログインは mcode CLI が行い、認証情報は本機に保存されます。CLI は同時に1地域のみログインできるため、切り替える前に他方からログアウトしてください。",
+  "minimaxRegionGlobal": "国際版（account.minimax.io）",
+  "minimaxRegionCn": "中国本土版（account.minimax.cn）",
+  "minimaxRegionLabel": "ログイン地域",
+  "minimaxLogin": "ログイン",
+  "minimaxLogout": "ログアウト",
+  "minimaxLoggingIn": "ブラウザで認証を完了してください…",
+  "minimaxLoginPrompt": "ログインするとここにアカウント状態と利用可能なモデルが表示されます。",
+  "minimaxModelsHint": "先に MiniMax Code をインストールしてログインしてください。ログイン後にモデル一覧が読み込まれます。",
+  "minimaxRegionMismatch": "ホストが別地域のモデルを返しました。ページを再読み込みして再試行してください。",
+  "minimaxLoginStarted": "ブラウザを開きました。ログインが完了するとこのカードが更新されます。",
+  "minimaxLoginFailed": "ログインに失敗しました",
+  "minimaxOpenUrl": "認証ページを開く",
+  "minimaxNotLoggedIn": "未ログイン",
+  "minimaxSignedIn": "ログイン済み",
+  "minimaxConfirmLogout": "選択した地域の MiniMax Code からログアウトしますか？",
+  "minimaxCliGroup": "MiniMax Code CLI",
+  "minimaxCliHint": "@minimax-ai/code（ネイティブ SQLite 依存を含む）をインストールします。npm 12 は既定でインストールスクリプトをブロックし、mcode が起動できなくなるため、ここでは公式フラグを使用します。",
+  "minimaxCliInstalled": "インストール済み",
+  "minimaxCliMissing": "未インストール",
+  "minimaxCliInstall": "CLI をインストール / 更新",
+  "minimaxCliUninstall": "CLI をアンインストール",
+  "minimaxCliInstalling": "インストール中…",
+  "minimaxCliUninstalling": "アンインストール中…",
+  "minimaxConfirmUninstall": "グローバルの MiniMax Code CLI をアンインストールしますか？ログイン状態は保持されます。",
+  "minimaxCliFailed": "CLI 操作に失敗しました",
+  "minimaxShowOutput": "出力を表示",
+  "minimaxHideOutput": "出力を隠す",
+  "minimaxNoUsage": "ログインするとアカウント、プラン、残りクォータが表示されます。",
+  "minimaxCliRequired": "ログインする前に MiniMax Code CLI をインストールしてください。",
+  "minimaxPlanExpires": "プランの有効期限",
+  "minimaxTokenRemaining": "アクセストークン: 残り {n} 分",
+  "minimaxTokenRemainingHours": "アクセストークン: 残り {n} 時間",
+  "minimaxTokenExpired": "アクセストークンの有効期限が切れました",
+  "minimaxTokenRenew": "CLI が次回呼び出し時に自動更新します。再ログインは不要です",
+  "minimaxAccount": "アカウント",
+  "minimaxAccountUnknown": "不明なアカウント",
+  "minimaxPlan": "プラン",
+  "minimaxPlanTokenPlan": "Token Plan",
+  "minimaxPlanCredits": "クレジット",
+  "minimaxPlanFree": "無料",
+  "minimaxCredits": "残りクレジット",
+  "minimaxCreditsPurchased": "購入",
+  "minimaxCreditsFree": "無料",
+  "minimaxQuotaRemaining": "残り",
+  "minimaxQuotaReset": "リセット:",
+  "minimaxQuotaUnlimited": "無制限",
+  "minimaxQuotaNone": "このアカウントには Token Plan のクォータ枠がありません。",
+  "minimaxRegionBlockedShort": "地域が利用できません",
+  "minimaxIpBlocked": "この端末の IP は MiniMax 国際版のサービス地域外のため、国際サイトが接続を拒否しました。中国本土版に切り替えるか、ネットワークを変更してください。",
+  "minimaxSwitchToCn": "中国本土版に切り替え",
+  "minimaxSwitchToGlobal": "国際版に切り替え",
+  "minimaxUsageLoading": "アカウントとクォータを読み込み中…",
+  "minimaxUsageFailed": "クォータを読み込めませんでした",
+      "usageCampaign": "キャンペーンクレジット",
+      "usageCampaignHint": "キャンペーンで付与されたクレジットです。パッケージごとに有効期限が異なります。",
+      "usageTotal": "合計",
+  "campaignPatTitle": "キャンペーン表示用 PAT",
+  "campaignPatHint": "Qoder のキャンペーン枠を表示するには、Personal Access Token を設定してください。OAuth ログインとは別に、キャンペーン枠の取得だけに使用します。",
+  "campaignPatPlaceholder": "Personal Access Token",
+  "campaignPatSave": "保存",
+  "campaignPatDelete": "削除",
+  "campaignPatConfigured": "設定済み",
+  "campaignPatNotConfigured": "未設定",
+  "campaignPatSaved": "保存しました",
+  "campaignPatDeleted": "削除しました",
+  "campaignPatSaveFailed": "PAT を確認できませんでした",
+  "campaignPatLink": "PAT を発行",
+  "campaignPatRegion": "Qoder グローバル版（qoder.com）",
+  "accountReveal": "クリックでユーザー名を表示",
+  "accountHide": "クリックでユーザー名を隠す",
+  "advancedFields": {
+    "displayName": "グループ名",
+    "maxSessions": "同時セッション数",
+    "modelCacheTtlSeconds": "モデル一覧キャッシュ（秒）",
+    "defaultReasoningEffort": "既定の推論強度",
+    "defaultMaxTokens": "既定の出力上限",
+    "toolResultTimeoutSeconds": "ツール結果の待機（秒）",
+    "catalogFetchTimeoutSeconds": "モデル一覧のタイムアウト（秒）",
+    "abortGraceSeconds": "中断の猶予（秒）",
+    "coldMaxTurns": "サイドチャネルのターン数",
+    "modelAliases": "モデル別名",
+    "intlDisplayName": "グローバル版グループ名",
+    "intlModelAliases": "グローバル版モデル別名",
+    "codebuddyDisplayName": "CodeBuddy グループ名",
+    "codebuddyModelAliases": "CodeBuddy モデル別名",
+    "minimaxDisplayName": "MiniMax グループ名",
+    "minimaxModelAliases": "MiniMax モデル別名"
+  }
+}
+
+    /**
+     * Scalars shown under Advanced, in order, with how to render each.
+     *
+     * The schema is the source of truth for labels, help text and bounds; this
+     * list only decides order and which control each field gets.
+     */
+    const ADVANCED = {
+      cn: [
+        ['displayName', 'text'],
+        ['maxSessions', 'number'],
+        ['modelCacheTtlSeconds', 'number'],
+        ['defaultReasoningEffort', 'text'],
+        ['defaultMaxTokens', 'number'],
+        ['toolResultTimeoutSeconds', 'number'],
+        ['catalogFetchTimeoutSeconds', 'number'],
+        ['abortGraceSeconds', 'number'],
+        ['coldMaxTurns', 'number'],
+        ['modelAliases', 'json'],
+      ],
+      // The shared scalars above already have a home on the CN page; the intl
+      // page only adds what is specific to that edition, so the same setting is
+      // never edited in two places with two different values.
+      global: [
+        ['intlDisplayName', 'text'],
+        ['intlModelAliases', 'json'],
+      ],
+      codebuddy: [
+        ['codebuddyDisplayName', 'text'],
+        ['codebuddyModelAliases', 'json'],
+      ],
+      minimax: [
+        ['minimaxDisplayName', 'text'],
+        ['minimaxModelAliases', 'json'],
+      ],
+    }
+
+    /**
+     * One settings section per provider.
+     *
+     * They share the page component and the API routes; only the config keys,
+     * the API brand and the copy differ.
+     */
+    const BRANDS = [
+      {
+        id: 'cn',
+        kind: 'qoder',
+        settingsId: 'qoder-cn',
+        order: 36,
+        titleKey: 'title',
+        navKey: 'nav',
+        introKey: 'intro',
+        noModelsKey: 'noModels',
+        cliGroupKey: 'cliGroup',
+        cliHintKey: 'cliHint',
+        fields: {
+          enabled: 'cnEnabled',
+          disabled: 'disabledModels',
+          windows: 'modelContextWindows',
+        },
+      },
+      {
+        id: 'global',
+        kind: 'qoder',
+        settingsId: 'qoder-intl',
+        order: 37,
+        titleKey: 'intlTitle',
+        navKey: 'intlNav',
+        introKey: 'intlIntro',
+        noModelsKey: 'intlNoModels',
+        cliGroupKey: 'intlCliGroup',
+        cliHintKey: 'intlCliHint',
+        fields: {
+          enabled: 'intlEnabled',
+          disabled: 'intlDisabledModels',
+          windows: 'intlModelContextWindows',
+        },
+      },
+      {
+        id: 'codebuddy',
+        kind: 'codebuddy',
+        settingsId: 'codebuddy',
+        order: 38,
+        titleKey: 'codebuddyTitle',
+        navKey: 'codebuddyNav',
+        introKey: 'codebuddyIntro',
+        noModelsKey: 'codebuddyNoModels',
+        fields: {
+          enabled: 'codebuddyEnabled',
+          // The page swaps these for the selected login region's own fields.
+          disabled: 'codebuddyGlobalDisabledModels',
+          windows: 'codebuddyGlobalModelContextWindows',
+        },
+      },
+      {
+        id: 'minimax',
+        kind: 'minimax',
+        settingsId: 'minimax',
+        order: 39,
+        titleKey: 'minimaxTitle',
+        navKey: 'minimaxNav',
+        introKey: 'minimaxIntro',
+        noModelsKey: 'minimaxNoModels',
+        fields: {
+          enabled: 'minimaxEnabled',
+          // Swapped for the selected region's fields, like CodeBuddy.
+          disabled: 'minimaxCnDisabledModels',
+          windows: 'minimaxCnModelContextWindows',
+        },
+      },
+    ]
+
+    const css = {
+      page: { maxWidth: '860px', display: 'flex', flexDirection: 'column', gap: '14px', color: 'var(--dsw-alias-label-primary)' },
+      h2: { margin: '0', fontSize: '1.25em' },
+      intro: { margin: '0', opacity: 0.72, lineHeight: 1.55, fontSize: '0.92em' },
+      bar: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+      btn: { padding: '6px 12px', borderRadius: '7px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit', fontSize: '0.88em' },
+      input: { padding: '6px 10px', borderRadius: '7px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', background: 'var(--dsw-alias-bg-base, transparent)', color: 'inherit', font: 'inherit', fontSize: '0.88em' },
+      search: { flex: '1 1 180px', minWidth: '140px' },
+      count: { fontSize: '0.85em', opacity: 0.7, marginLeft: 'auto' },
+      list: { display: 'flex', flexDirection: 'column', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.25))', borderRadius: '10px', overflow: 'hidden' },
+      row: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.15))' },
+      rowFirst: { borderTop: 'none' },
+      rowOff: { opacity: 0.5 },
+      name: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' },
+      nameText: { fontSize: '0.92em', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      id: { fontSize: '0.76em', opacity: 0.55, fontFamily: 'ui-monospace, monospace' },
+      tag: { fontSize: '0.72em', padding: '1px 6px', borderRadius: '5px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', opacity: 0.75 },
+      price: { fontSize: '0.9em', opacity: 0.7, fontWeight: 400 },
+      select: { padding: '5px 8px', borderRadius: '7px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', background: 'var(--dsw-alias-bg-base, transparent)', color: 'inherit', font: 'inherit', fontSize: '0.85em', minWidth: '104px' },
+      switch: { width: '17px', height: '17px', cursor: 'pointer', accentColor: 'var(--dsw-alias-brand-primary, #4c6ef5)' },
+      note: { fontSize: '0.82em', opacity: 0.62, lineHeight: 1.5 },
+      err: { fontSize: '0.86em', color: 'var(--dsw-alias-label-danger, #e03131)' },
+      guide: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', padding: '12px 14px', borderRadius: '10px', border: '1px solid var(--dsw-alias-label-danger, #e03131)', background: 'rgba(224,49,49,0.07)' },
+      guideText: { flex: '1 1 240px', fontSize: '0.88em', lineHeight: 1.5, color: 'var(--dsw-alias-label-danger, #e03131)' },
+      btnAlert: { border: '1px solid var(--dsw-alias-label-danger, #e03131)', color: 'var(--dsw-alias-label-danger, #e03131)' },
+      group: { display: 'flex', flexDirection: 'column', gap: '10px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.25))', borderRadius: '10px', padding: '14px 16px' },
+      advLabel: { fontSize: '0.88em' },
+      h3: { margin: 0, fontSize: '0.95em' },
+      log: { margin: '0', maxHeight: '240px', overflowY: 'auto', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.25))', background: 'var(--dsw-alias-bg-base, rgba(128,128,128,0.05))', fontFamily: 'ui-monospace, monospace', fontSize: '0.76em', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+      usageCard: { display: 'flex', flexDirection: 'column', gap: '10px', padding: '14px 16px', borderRadius: '10px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.25))', background: 'var(--dsw-alias-bg-base, rgba(128,128,128,0.03))' },
+      logo: { width: '22px', height: '22px', flex: 'none', borderRadius: '6px', objectFit: 'contain' },
+      campaignBlock: { display: 'flex', flexDirection: 'column', gap: '6px' },
+      campaignHead: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap', fontSize: '0.86em' },
+      usageHead: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' },
+      progressOuter: { height: '8px', borderRadius: '999px', background: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.22))', overflow: 'hidden' },
+      progressInner: { height: '100%', borderRadius: '999px', background: 'var(--dsw-alias-brand-primary, #4c6ef5)', transition: 'width .25s ease' },
+      progressDanger: { background: 'var(--dsw-alias-label-danger, #e03131)' },
+      creditStack: { display: 'flex', flexDirection: 'column', gap: '14px' },
+      creditMeter: { display: 'flex', flexDirection: 'column', gap: '6px' },
+      creditName: { fontSize: '0.8em', opacity: 0.55 },
+      creditRow: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap', fontSize: '0.9em' },
+      creditLabel: { opacity: 0.62, minWidth: '56px' },
+      creditAmount: { fontWeight: 600, fontSize: '1.04em', fontVariantNumeric: 'tabular-nums' },
+      creditPct: { marginLeft: 'auto', opacity: 0.62, fontVariantNumeric: 'tabular-nums' },
+      creditBar: { height: '6px', borderRadius: '999px', background: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.22))', overflow: 'hidden' },
+      creditBarFill: { height: '100%', borderRadius: '999px', background: 'var(--dsw-alias-brand-primary, #4c6ef5)', transition: 'width .25s ease' },
+      usageLine: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap', fontSize: '0.86em' },
+      usageLabel: { opacity: 0.62, minWidth: '72px' },
+      usageValue: { fontWeight: 500 },
+      link: { color: 'var(--dsw-alias-brand-primary, #4c6ef5)', textDecoration: 'none', fontSize: '0.86em' },
+      usageFoot: { display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', fontSize: '0.8em', opacity: 0.6 },
+      packBlock: { display: 'flex', flexDirection: 'column', gap: '6px' },
+      packHead: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap', fontSize: '0.86em' },
+      packToggle: { marginLeft: 'auto', background: 'none', border: 'none', padding: 0, font: 'inherit', fontSize: '0.8em', color: 'var(--dsw-alias-brand-primary, #4c6ef5)', cursor: 'pointer' },
+      packList: { display: 'flex', flexDirection: 'column', borderRadius: '8px', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.25))', overflow: 'hidden' },
+      packListScroll: { maxHeight: '190px', overflowY: 'auto' },
+      packRow: { display: 'grid', gridTemplateColumns: 'minmax(90px, 1.5fr) auto auto', alignItems: 'baseline', gap: '10px', padding: '6px 10px', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.15))', fontSize: '0.82em' },
+      packFirst: { borderTop: 'none' },
+      packLabel: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      packAmount: { fontFamily: 'ui-monospace, monospace', textAlign: 'right', whiteSpace: 'nowrap' },
+      packExpiry: { opacity: 0.6, whiteSpace: 'nowrap', fontSize: '0.92em' },
+      optionRow: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 0', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.15))' },
+      optionFirst: { borderTop: 'none', paddingTop: 0 },
+      optionText: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' },
+      optionName: { fontSize: '0.92em', fontWeight: 500 },
+      optionStatus: { fontSize: '0.82em', opacity: 0.62 },
+    }
+
+    /**
+     * Same-origin API base, resolved against the document so a deployment under
+     * a sub-path still reaches its own host.
+     */
+    const API = (() => {
+      try { return new URL('api/llm-qoder-cn', document.baseURI).pathname } catch { return '/api/llm-qoder-cn' }
+    })()
+
+    /**
+     * Last successful answer per edition, so reopening a settings page paints
+     * the previous content immediately and refreshes behind it.
+     *
+     * The cache is deliberately stale-while-revalidate: the page never waits on
+     * the CLI just to show something it showed a minute ago. Both the model list
+     * and the quota reading are cached separately because they are fetched by
+     * different cards. `localStorage` keeps the snapshot across a page reload;
+     * the in-memory map covers a deployment where storage is unavailable.
+     */
+    const CACHE_PREFIX = 'dsh-qoder-oauth/cache/v1'
+    const cacheMemory = new Map()
+
+    function cacheKey(brand, kind) {
+      return `${CACHE_PREFIX}:${brand}:${kind}`
+    }
+
+    function readCache(brand, kind) {
+      const key = cacheKey(brand, kind)
+      const held = cacheMemory.get(key)
+      if (held !== undefined) return held
+      try {
+        const raw = window.localStorage.getItem(key)
+        if (raw === null) return undefined
+        const parsed = JSON.parse(raw)
+        cacheMemory.set(key, parsed)
+        return parsed
+      } catch {
+        return undefined
+      }
+    }
+
+    function writeCache(brand, kind, value) {
+      const key = cacheKey(brand, kind)
+      cacheMemory.set(key, value)
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value))
+      } catch {
+        /* private mode or a full quota: the in-memory copy still works */
+      }
+    }
+
+    /**
+     * Forget one cached answer.
+     *
+     * Needed when the cache has become wrong rather than merely old: after an
+     * uninstall the stored quota describes an account read through a CLI that
+     * is no longer on the machine, and painting it again on the next render
+     * would keep showing numbers nobody can reproduce.
+     */
+    function clearCache(brand, kind) {
+      const key = cacheKey(brand, kind)
+      cacheMemory.delete(key)
+      try {
+        window.localStorage.removeItem(key)
+      } catch {
+        /* storage unavailable: the in-memory copy is already gone */
+      }
+    }
+
+    /** Call the plugin's model API. */
+    async function api(path, options) {
+      const { timeout = 30_000, ...rest } = options ?? {}
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), timeout)
+      try {
+        const response = await fetch(`${API}${path}`, { ...rest, signal: ctrl.signal })
+        const text = await response.text()
+        let payload
+        try { payload = text === '' ? {} : JSON.parse(text) } catch { payload = { error: text.slice(0, 200) } }
+        if (!response.ok) throw new Error(payload?.error ?? `HTTP ${response.status}`)
+        return payload
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+
+    /**
+     * How long a settings write may take before the page gives up on it.
+     *
+     * A config write is a round trip to the host, which commits the value into
+     * the running plugin before it answers, so this is not a normal-path limit —
+     * it is a floor under the UI. Without it a wire call that never settles
+     * leaves every control disabled forever, which is exactly how this page was
+     * previously reported as frozen.
+     */
+    const WRITE_TIMEOUT_MS = 20_000
+
+    /** Settle with `promise`, or reject with `message` once `ms` elapse. */
+    function withDeadline(promise, ms, message) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), ms)
+        promise.then(
+          value => { clearTimeout(timer); resolve(value) },
+          error => { clearTimeout(timer); reject(error) },
+        )
+      })
+    }
+
+    /** Compact label for a token count. */
+    function windowLabel(n) {
+      if (typeof n !== 'number' || !Number.isFinite(n)) return '—'
+      if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1))}M`
+      if (n >= 1000) return `${Math.round(n / 1000)}K`
+      return String(n)
+    }
+
+    /**
+     * The credit multiplier upstream quotes, as a short suffix.
+     *
+     * `0` renders as 免费 rather than `x0`, matching how the Qoder client shows
+     * a free model. A model upstream quoted no multiplier for gets no suffix at
+     * all — inventing one would misstate its cost.
+     */
+    function priceSuffix(t, factor) {
+      if (typeof factor !== 'number' || !Number.isFinite(factor) || factor < 0) return ''
+      if (factor === 0) return t('free')
+      return `x${Number(factor.toFixed(4))}`
+    }
+
+    /** A 0–100 percentage, clamped, or undefined when the value is not a number. */
+    function percentOf(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+      return Math.max(0, Math.min(100, value))
+    }
+
+    /** A credit count with group separators; dashes for absent values. */
+    function creditsOf(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+      return value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    }
+
+    /**
+     * Whether a timestamp means "no expiry".
+     *
+     * The quota endpoint reports plan end dates as a sentinel far in the future
+     * (year 9999). Rendering that as a date is technically true and practically
+     * noise, so it is shown as "never".
+     */
+    function neverExpires(ms) {
+      return typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0 || ms > Date.now() + 50 * 365 * 24 * 3600 * 1000
+    }
+
+    /** A short local date for an epoch-millisecond value. */
+    function dateLabel(ms) {
+      try { return new Date(ms).toLocaleDateString(undefined) } catch { return String(ms) }
+    }
+
+    /**
+     * The collapsed-row figures for a set of credit packages.
+     *
+     * A region can carry a dozen packages, so the card shows one summary row
+     * (count, combined total, nearest expiry) and lists them only when asked.
+     * `nearest` skips the endpoint's "never expires" sentinel: printing year
+     * 9999 as the earliest expiry is noise, and the same rule already
+     * suppresses it on the footer.
+     */
+    function packageSummary(packages) {
+      const list = Array.isArray(packages) ? packages : []
+      let total = 0
+      for (const pkg of list) {
+        if (typeof pkg?.total === 'number' && Number.isFinite(pkg.total)) total += pkg.total
+        else if (typeof pkg?.used === 'number' && Number.isFinite(pkg.used)) total += pkg.used
+      }
+      const nearest = list
+        .map(pkg => pkg?.end)
+        .filter(value => !neverExpires(value))
+        .sort((a, b) => a - b)[0]
+      return { count: list.length, total, nearest }
+    }
+
+    /**
+     * How long a short-lived credential still has, phrased as a countdown.
+     *
+     * The MiniMax CLI's OAuth access token lives about an hour and the CLI
+     * renews it on its next call, so an absolute date is always "today" and
+     * reads like a problem that does not exist. A countdown carries the
+     * information the date pretended to give.
+     */
+    function tokenExpiryText(t, ms, now = Date.now()) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return t('minimaxTokenExpired')
+      const minutes = Math.round((ms - now) / 60_000)
+      if (minutes <= 0) return t('minimaxTokenExpired')
+      if (minutes < 60) return t('minimaxTokenRemaining').replace('{n}', String(minutes))
+      return t('minimaxTokenRemainingHours').replace('{n}', String(Math.floor(minutes / 60)))
+    }
+
+    /** A finite number, or undefined for anything else. */
+    function countOf(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+    }
+
+    /**
+     * The used/total reading one credit bucket is rendered from.
+     *
+     * Upstream quotes a bucket either as `used` + `total` or as `remaining` +
+     * `total` (Qoder's organization package calls the total `cap`). Both shapes
+     * are normalized here, and the percentage is computed from the same numbers
+     * the row prints: an upstream percentage that disagreed with them would
+     * make the bar contradict its own label.
+     */
+    function creditReading(bucket) {
+      if (bucket === null || typeof bucket !== 'object') return undefined
+      const total = countOf(bucket.total) ?? countOf(bucket.cap)
+      const remaining = countOf(bucket.remaining)
+      const used = countOf(bucket.used) ?? (total !== undefined && remaining !== undefined ? Math.max(0, total - remaining) : undefined)
+      const measured = total !== undefined && total > 0 && used !== undefined
+        ? Math.max(0, Math.min(100, (used / total) * 100))
+        : undefined
+      const pct = measured ?? percentOf(bucket.percentage)
+      // Some plans report only a percentage: it still fills the bar even though
+      // the row has no counts to print.
+      if (used === undefined && total === undefined && remaining === undefined) {
+        return pct === undefined ? undefined : { pct }
+      }
+      return { used, total, remaining, pct }
+    }
+
+    /** A bucket's unit, localized when upstream says the generic "credits". */
+    function creditUnit(t, bucket) {
+      const unit = typeof bucket?.unit === 'string' ? bucket.unit.trim() : ''
+      if (unit === '') return t('usageCredits')
+      return /^credits?$/i.test(unit) ? t('usageCredits') : unit
+    }
+
+    /**
+     * One credit bucket in the shape both account cards use: `used / total`
+     * with the percentage on the right and a bar underneath.
+     *
+     * A bucket the account does not have reports no numbers at all, so it
+     * renders nothing rather than an empty bar.
+     */
+    function CreditMeter({ t, label, bucket, danger }) {
+      const reading = creditReading(bucket)
+      if (reading === undefined) return null
+      const { used, total, remaining, pct } = reading
+      const amount = total !== undefined && used !== undefined
+        ? `${creditsOf(used)} / ${creditsOf(total)} ${creditUnit(t, bucket)}`
+        : total !== undefined && remaining !== undefined
+          ? `${creditsOf(remaining)} / ${creditsOf(total)} ${creditUnit(t, bucket)}`
+          : used !== undefined
+            ? `${creditsOf(used)} ${creditUnit(t, bucket)}`
+            : remaining !== undefined
+              ? `${creditsOf(remaining)} ${creditUnit(t, bucket)}`
+              : undefined
+      return h('div', { style: css.creditMeter },
+        label === undefined ? null : h('div', { style: css.creditName }, label),
+        h('div', { style: css.creditRow },
+          amount === undefined ? null : h('span', { style: css.creditLabel }, used !== undefined ? t('usageUsed') : t('usageRemaining')),
+          amount === undefined ? null : h('span', { style: css.creditAmount }, amount),
+          pct === undefined ? null : h('span', { style: css.creditPct }, `${Number(pct.toFixed(1))}%`),
+        ),
+        pct === undefined ? null : h('div', { style: css.creditBar },
+          h('div', {
+            style: {
+              ...css.creditBarFill,
+              width: `${pct}%`,
+              ...(danger === true || pct >= 100 ? css.progressDanger : {}),
+            },
+          }),
+        ),
+      )
+    }
+
+    /**
+     * A random alias with the same character count as the real account name.
+     * The page never shows a longer placeholder than the name it replaces.
+     */
+    function randomAlias(length) {
+      const pool = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+      const size = Math.max(1, Math.trunc(Number(length) || 1))
+      let out = ''
+      for (let index = 0; index < size; index += 1) {
+        out += pool[Math.floor(Math.random() * pool.length)]
+      }
+      return out
+    }
+
+    /**
+     * Account quota and usage, read through the CLI.
+     *
+     * This is the same data the Qoder clients show on their account panel: plan,
+     * percentage used, remaining credits, add-on package, expiry and the
+     * upgrade/usage links. It is fetched from the host (which asks the CLI), not
+     * from the provider directly, because only the CLI holds a usable token.
+     */
+    function UsageCard({ t, brand, refreshSignal, resetSignal }) {
+      const [snapshot, setSnapshot] = useState(() => readCache(brand.id, 'usage'))
+      const [failure, setFailure] = useState(undefined)
+      const [busy, setBusy] = useState(false)
+      /** The CLI is not installed: show that, and never any cached numbers. */
+      const [missing, setMissing] = useState(false)
+      /** The user just signed out from this page: no reading is expected. */
+      const [signedOut, setSignedOut] = useState(false)
+      /** Blur the account name until the user clicks it. */
+      const [revealed, setRevealed] = useState(false)
+      const [aliasSeed, setAliasSeed] = useState(0)
+      const ticket = useRef(0)
+      const lastReset = useRef(resetSignal)
+
+      const load = useCallback(async (fresh = false) => {
+        const mine = ++ticket.current
+        setBusy(true)
+        setFailure(undefined)
+        try {
+          const payload = await api(`/usage?brand=${brand.id}${fresh ? '&fresh=1' : ''}`, { timeout: 45_000 })
+          if (mine !== ticket.current) return
+          // The CLI is gone: the stored reading describes an installation that
+          // no longer exists, so drop it (memory and storage) instead of
+          // labelling old credits "last reading". This is what makes the card
+          // empty out after an uninstall.
+          if (payload?.cliMissing === true) {
+            clearCache(brand.id, 'usage')
+            setSnapshot(undefined)
+            setMissing(true)
+            setSignedOut(false)
+            setFailure(String(payload.error ?? t('usageCliMissing')))
+            return
+          }
+          // Any other failed lookup (signed out, endpoint down) must not replace
+          // the last good reading with an empty card: keep it and say so.
+          if (payload?.usage === undefined && payload?.error !== undefined) {
+            setMissing(false)
+            setFailure(String(payload.error))
+            return
+          }
+          setMissing(false)
+          setSignedOut(false)
+          setSnapshot(payload)
+          writeCache(brand.id, 'usage', payload)
+        } catch (err) {
+          if (mine !== ticket.current) return
+          setFailure(String(err?.message ?? err))
+        } finally {
+          if (mine === ticket.current) setBusy(false)
+        }
+      }, [brand.id])
+
+      // `refreshSignal` changes after a CLI install or uninstall, both of which
+      // make the cached account reading describe a machine state that is gone.
+      useEffect(() => { void load() }, [load, refreshSignal])
+
+      // A sign-out makes the stored reading describe an account that is no
+      // longer signed in — the same lie the uninstall case told. `resetSignal`
+      // changes only for that action, so an ordinary refresh keeps its
+      // stale-while-revalidate behaviour.
+      useEffect(() => {
+        if (lastReset.current === resetSignal) return
+        lastReset.current = resetSignal
+        clearCache(brand.id, 'usage')
+        setSnapshot(undefined)
+        setMissing(false)
+        setFailure(undefined)
+        // Do not fetch: the CLI has just been signed out, so a read would only
+        // produce an authentication error that looks like a malfunction. The
+        // refresh button and the next sign-in both still work.
+        setSignedOut(true)
+      }, [resetSignal, brand.id])
+
+      const usage = snapshot?.usage
+      const account = snapshot?.account
+      const error = failure ?? (snapshot?.usage === undefined && snapshot?.error !== undefined ? String(snapshot.error) : undefined)
+      const plan = account?.subscriptionType ?? usage?.userType ?? t('usageUnknownPlan')
+      const identity = account?.name ?? account?.email ?? usage?.userId
+      const alias = useMemo(
+        () => randomAlias(identity === undefined ? 1 : Array.from(identity).length),
+        [identity, aliasSeed],
+      )
+      const exceeded = usage?.isQuotaExceeded === true
+      const campaignPackages = Array.isArray(usage?.dedicatedResourcePackages)
+        ? usage.dedicatedResourcePackages
+        : []
+      const campaignTitle = (pkg) => {
+        const title = pkg?.title ?? {}
+        const language = String(document.documentElement.lang || navigator.language || 'en').slice(0, 2).toLowerCase()
+        return title[language] ?? title.en ?? title.zh ?? pkg?.name ?? t('usageCampaign')
+      }
+
+      const head = h('div', { style: css.usageHead },
+        h('h3', { style: css.h3 }, t('usageTitle')),
+        identity === undefined
+          ? null
+          : h('span', { style: { ...css.note, opacity: 0.7, display: 'inline-flex', alignItems: 'baseline', gap: '4px' } },
+              h('span', null, t('usageAccount')),
+              h('button', {
+                type: 'button',
+                title: revealed ? t('accountHide') : t('accountReveal'),
+                onClick: () => {
+                  if (revealed) setAliasSeed(value => value + 1)
+                  setRevealed(value => !value)
+                },
+                style: {
+                  border: 'none',
+                  background: 'transparent',
+                  padding: 0,
+                  font: 'inherit',
+                  color: 'inherit',
+                  cursor: 'pointer',
+                  filter: revealed ? 'none' : 'blur(5px)',
+                  transition: 'filter .15s ease',
+                  userSelect: 'none',
+                },
+              }, revealed ? identity : alias),
+            ),
+        h('button', {
+          style: { ...css.btn, marginLeft: 'auto' },
+          disabled: busy,
+          onClick: () => void load(true),
+        }, busy ? t('refreshing') : t('usageRefresh')),
+      )
+
+      if (snapshot === undefined || usage === undefined) {
+        return h('div', { style: css.usageCard },
+          head,
+          // Nothing is shown for a missing CLI beyond the reason: the account,
+          // plan and credits a previous install reported are not this machine's
+          // state any more.
+          missing
+            ? h('div', { style: css.note }, error ?? t('usageCliMissing'))
+            : signedOut
+              ? h('div', { style: css.note }, t('usageSignedOut'))
+              : error === undefined
+                ? h('div', { style: css.note }, t('usageLoading'))
+                : h('div', { style: css.err }, `${t('usageUnavailable')}：${error}`),
+          error === undefined
+            ? null
+            : h('div', { style: css.bar },
+                h('button', { style: css.btn, disabled: busy, onClick: () => void load(true) }, t('usageRetry')),
+              ),
+        )
+      }
+
+      const expiry = usage?.expiresAt
+      return h('div', { style: css.usageCard },
+        head,
+        h('div', { style: css.usageLine },
+          h('span', { style: css.usageLabel }, t('usagePlan')),
+          h('span', { style: css.usageValue }, plan),
+          exceeded ? h('span', { style: { ...css.err, fontWeight: 600 } }, t('usageExceeded')) : null,
+        ),
+        h('div', { style: css.creditStack },
+          (() => {
+            const buckets = [
+              [t('usagePlanQuota'), usage?.userQuota],
+              [t('usageAddOn'), usage?.addOnQuota],
+              [t('usageOrgPackage'), usage?.orgResourcePackage],
+            ]
+            // Some accounts report only the overall percentage; a card with no
+            // meter at all would hide the one number the endpoint did give.
+            if (buckets.some(([, bucket]) => creditReading(bucket) !== undefined)) {
+              return buckets.map(([label, bucket]) => h(CreditMeter, {
+                key: label, t, label, bucket, danger: exceeded,
+              }))
+            }
+            return percentOf(usage?.totalUsagePercentage) === undefined
+              ? null
+              : h(CreditMeter, {
+                  t,
+                  label: t('usagePlanQuota'),
+                  bucket: { percentage: usage.totalUsagePercentage },
+                  danger: exceeded,
+                })
+          })(),
+        ),
+        campaignPackages.length === 0 ? null : h('div', { style: css.campaignBlock },
+          h('div', { style: css.campaignHead },
+            h('span', { style: css.usageLabel }, t('usageCampaign')),
+            h('span', { style: css.note }, t('usageCampaignHint')),
+          ),
+          h('div', { style: css.packList },
+            campaignPackages.map((pkg, index) => h('div', {
+              key: pkg?.id ?? String(index),
+              style: { ...css.packRow, ...(index === 0 ? css.packFirst : {}) },
+            },
+              h('span', { style: css.packLabel, title: campaignTitle(pkg) }, campaignTitle(pkg)),
+              pkg?.expiresAt === undefined ? null : h('span', { style: css.packExpiry }, `${t('usageExpires')} ${dateLabel(pkg.expiresAt)}`),
+              h('span', { style: css.packAmount }, `${t('usageRemaining')} ${creditsOf(pkg?.remaining)} / ${t('usageTotal')} ${creditsOf(pkg?.total)}`),
+            )),
+          ),
+        ),
+        h('div', { style: css.usageFoot },
+          expiry === undefined || neverExpires(expiry)
+            ? h('span', null, `${t('usageExpires')} ${t('usageNever')}`)
+            : h('span', null, `${t('usageExpires')} ${dateLabel(expiry)}`),
+          snapshot?.at === undefined ? null : h('span', null, `${t('usageUpdated')} ${new Date(snapshot.at).toLocaleTimeString(undefined)}`),
+          typeof usage?.addOnQuota?.detailUrl === 'string'
+            ? h('a', { href: usage.addOnQuota.detailUrl, target: '_blank', rel: 'noreferrer', style: css.link }, t('usageDetail'))
+            : null,
+          typeof usage?.upgradeUrl === 'string' && usage.upgradeUrl !== ''
+            ? h('a', { href: usage.upgradeUrl, target: '_blank', rel: 'noreferrer', style: css.link }, t('usageUpgrade'))
+            : null,
+          failure === undefined
+            ? null
+            : h('span', { style: css.err }, `${t('usageStale')}：${failure}`),
+        ),
+      )
+    }
+
+    /**
+     * Optional PAT used only for the Qoder campaign quota. The OAuth/CLI sign-in
+     * stays the credential for models; this token is exchanged by the host to
+     * read dedicatedResourcePackages and is never sent back to the page.
+     */
+    function CampaignPatCard({ t, onChanged }) {
+      const [configured, setConfigured] = useState(undefined)
+      const [token, setToken] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [status, setStatus] = useState(undefined)
+      const [error, setError] = useState(undefined)
+
+      useEffect(() => {
+        let alive = true
+        api('/campaign-pat')
+          .then(payload => { if (alive) setConfigured(payload?.configured === true) })
+          .catch(() => { if (alive) setConfigured(false) })
+        return () => { alive = false }
+      }, [])
+
+      const save = async () => {
+        const value = token.trim()
+        if (value === '') return
+        setBusy(true)
+        setStatus(undefined)
+        setError(undefined)
+        try {
+          await api('/campaign-pat', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ token: value }),
+          })
+          setConfigured(true)
+          setToken('')
+          setStatus(t('campaignPatSaved'))
+          onChanged?.()
+        } catch (err) {
+          setError(`${t('campaignPatSaveFailed')}：${String(err?.message ?? err)}`)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const remove = async () => {
+        setBusy(true)
+        setStatus(undefined)
+        setError(undefined)
+        try {
+          await api('/campaign-pat', { method: 'DELETE' })
+          setConfigured(false)
+          setStatus(t('campaignPatDeleted'))
+          onChanged?.()
+        } catch (err) {
+          setError(String(err?.message ?? err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', { style: css.usageCard },
+        h('div', { style: css.usageHead },
+          h('h3', { style: css.h3 }, t('campaignPatTitle')),
+          h('span', { style: { ...css.note, opacity: 0.7 } },
+            configured === undefined ? '' : configured ? t('campaignPatConfigured') : t('campaignPatNotConfigured')),
+        ),
+        h('div', { style: css.note }, t('campaignPatHint')),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          h('input', {
+            type: 'password',
+            value: token,
+            placeholder: t('campaignPatPlaceholder'),
+            autoComplete: 'off',
+            disabled: busy,
+            onChange: event => setToken(event.target.value),
+            style: { ...css.select, flex: '1 1 240px', minWidth: '180px' },
+          }),
+          h('button', { style: css.btn, disabled: busy || token.trim() === '', onClick: () => void save() },
+            busy ? t('saving') : t('campaignPatSave')),
+          configured === true
+            ? h('button', { style: { ...css.btn, ...css.btnAlert }, disabled: busy, onClick: () => void remove() }, t('campaignPatDelete'))
+            : null,
+        ),
+        h('div', { style: { ...css.note, display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' } },
+          h('a', { href: 'https://qoder.com/account/integrations', target: '_blank', rel: 'noreferrer', style: css.link }, t('campaignPatLink')),
+          h('span', { style: { opacity: 0.55 } }, t('campaignPatRegion')),
+        ),
+        status === undefined ? null : h('div', { style: css.note }, status),
+        error === undefined ? null : h('div', { style: css.err }, error),
+      )
+    }
+
+    /**
+     * CodeBuddy's account card: region choice, browser login/logout and the
+     * signed-in account.
+     *
+     * The region is a config write (the host starts the CLI with it), but the
+     * card does not wait for it: the target region's snapshot paints first and
+     * the live account read follows. Both regions keep their own saved login,
+     * so switching back does not open the browser again.
+     */
+    function codeBuddySnapshot(region) {
+      const cached = readCache('codebuddy', `snapshot:${region}`)
+      return cached !== null && typeof cached === 'object' ? cached : undefined
+    }
+
+    function rememberCodeBuddy(region, patch) {
+      const previous = codeBuddySnapshot(region) ?? {}
+      writeCache('codebuddy', `snapshot:${region}`, { ...previous, ...patch, at: Date.now() })
+    }
+
+    function CodeBuddyCard({ t, ctx, brand, refreshSignal, onSignedIn, onAuthChange, onRegionChange }) {
+      const form = ctx.configForms.get(NS)
+      const subscribe = useCallback(listener => form.subscribe(listener), [form])
+      const read = useCallback(() => form.getSnapshot(), [form])
+      const snapshot = useSyncExternalStore(subscribe, read)
+      const value = snapshot?.value ?? {}
+      const configuredRegion = value.codebuddyRegion === 'cn' ? 'cn' : 'global'
+      const [region, setRegionState] = useState(configuredRegion)
+      const regionRef = useRef(configuredRegion)
+      const initial = codeBuddySnapshot(configuredRegion)
+      const [auth, setAuth] = useState(initial?.auth)
+      const [account, setAccount] = useState(initial?.account)
+      const [error, setError] = useState(undefined)
+      const [busy, setBusy] = useState(false)
+      // Credit packages default to one summary row; the per-package list only
+      // opens on request, inside a bounded scroll area.
+      const [packsExpanded, setPacksExpanded] = useState(false)
+      const lastRunning = useRef(false)
+      const signingIn = auth?.running === true
+      const accountFields = account?.account ?? {}
+      const accountSignedIn = account?.error === undefined
+        && ['uid', 'userName', 'email', 'organization', 'subscriptionType']
+          .some(key => typeof accountFields[key] === 'string' && accountFields[key] !== '')
+      // The host's status is authoritative once it has answered; the account
+      // reading only covers the first paint before that answer arrives.
+      const signedIn = auth === undefined ? accountSignedIn : auth.signedIn === true
+      const resolved = auth !== undefined || account !== undefined
+
+      const applySnapshot = useCallback(target => {
+        const cached = codeBuddySnapshot(target)
+        setAuth(cached?.auth)
+        setAccount(cached?.account)
+      }, [])
+
+      const loadAccount = useCallback(async (fresh = false, target = regionRef.current) => {
+        try {
+          const payload = await api(`/usage?brand=codebuddy&region=${target}${fresh ? '&fresh=1' : ''}`, { timeout: 45_000 })
+          if (regionRef.current !== target) return
+          setAccount(payload)
+          rememberCodeBuddy(target, { account: payload })
+          // A quota 401 clears the server's credential; mirror that here so the
+          // button flips back to 登录 without waiting for a page reload.
+          if (typeof payload?.signedIn === 'boolean') {
+            const next = { running: false, region: target, signedIn: payload.signedIn }
+            setAuth(previous => (previous?.running === true ? previous : next))
+            rememberCodeBuddy(target, { auth: next })
+          }
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setAccount({ error: String(err?.message ?? err) })
+        }
+      }, [])
+
+      const poll = useCallback(async (target = regionRef.current) => {
+        try {
+          const next = await api(`/auth?brand=codebuddy&region=${target}`, { timeout: 10_000 })
+          if (regionRef.current !== target) return
+          setAuth(next)
+          rememberCodeBuddy(target, { auth: next })
+          if (lastRunning.current && next.running === false) {
+            lastRunning.current = false
+            if (next.error === undefined) await loadAccount(true, target)
+          }
+          if (next.running === true) lastRunning.current = true
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setError(String(err?.message ?? err))
+        }
+      }, [loadAccount])
+
+      // Paint the target region from its snapshot, then verify in the background.
+      useEffect(() => {
+        regionRef.current = region
+        applySnapshot(region)
+        setError(undefined)
+        void poll(region)
+        void loadAccount(false, region)
+        const timer = setTimeout(() => { void loadAccount(true, region) }, 250)
+        return () => clearTimeout(timer)
+      }, [region, refreshSignal, applySnapshot, loadAccount, poll])
+
+      // A config edit from elsewhere (or a reload) becomes the new selection.
+      useEffect(() => {
+        if (configuredRegion === regionRef.current) return
+        setRegionState(configuredRegion)
+        regionRef.current = configuredRegion
+        applySnapshot(configuredRegion)
+        setPacksExpanded(false)
+      }, [configuredRegion, applySnapshot])
+
+      useEffect(() => {
+        if (auth?.running !== true) return undefined
+        const timer = setInterval(() => { void poll(region) }, 1500)
+        return () => clearInterval(timer)
+      }, [auth?.running, poll, region])
+
+      useEffect(() => { if (resolved) onAuthChange?.(signedIn) }, [resolved, signedIn, onAuthChange])
+
+      const setRegion = useCallback(next => {
+        if (next === regionRef.current) return
+        // Local paint first; the config write is only needed by the adapter.
+        regionRef.current = next
+        lastRunning.current = false
+        setRegionState(next)
+        applySnapshot(next)
+        setPacksExpanded(false)
+        setError(undefined)
+        onRegionChange?.(next)
+        void (async () => {
+          try {
+            const accepted = await withDeadline(form.set('codebuddyRegion', next), WRITE_TIMEOUT_MS, t('timeout'))
+            if (accepted === false) throw new Error(t('saveFailed'))
+            if (regionRef.current === next) onSignedIn?.()
+          } catch (err) {
+            if (regionRef.current !== next) return
+            setError(`${t('saveFailed')}：${String(err?.message ?? err)}`)
+            const fallback = form.getSnapshot()?.value?.codebuddyRegion === 'cn' ? 'cn' : 'global'
+            regionRef.current = fallback
+            setRegionState(fallback)
+            applySnapshot(fallback)
+            onRegionChange?.(fallback)
+          }
+        })()
+      }, [applySnapshot, form, onRegionChange, onSignedIn, t])
+
+      const startLogin = useCallback(async () => {
+        const target = regionRef.current
+        setBusy(true)
+        setError(undefined)
+        try {
+          const next = await api('/auth', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brand: 'codebuddy', region: target, action: 'login' }),
+            timeout: 20_000,
+          })
+          if (regionRef.current !== target) return
+          setAuth(next)
+          rememberCodeBuddy(target, { auth: next })
+          if (next.running === true) lastRunning.current = true
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setError(`${t('codebuddyLoginFailed')}：${String(err?.message ?? err)}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [t])
+
+      const logout = useCallback(async () => {
+        if (typeof window.confirm === 'function' && !window.confirm(t('codebuddyConfirmLogout'))) return
+        const target = regionRef.current
+        setBusy(true)
+        setError(undefined)
+        try {
+          const next = await api('/auth', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brand: 'codebuddy', region: target, action: 'logout' }),
+            timeout: 20_000,
+          })
+          if (regionRef.current !== target) return
+          setAuth(next)
+          setAccount(undefined)
+          rememberCodeBuddy(target, { auth: next, account: undefined })
+          onAuthChange?.(false)
+          await loadAccount(true, target)
+        } catch (err) {
+          if (regionRef.current !== target) return
+          // The host clears its local credential even when the CLI refuses the
+          // logout, so the card must not keep presenting the account.
+          const signedOut = { running: false, region: target, signedIn: false }
+          setAuth(signedOut)
+          setAccount(undefined)
+          rememberCodeBuddy(target, { auth: signedOut, account: undefined })
+          onAuthChange?.(false)
+          setError(String(err?.message ?? err))
+        } finally {
+          setBusy(false)
+        }
+      }, [loadAccount, onAuthChange, t])
+
+      const accountText = account?.account === undefined
+        ? (account?.error ?? t('codebuddyAccountUnknown'))
+        : [account.account.email, account.account.organization, account.account.subscriptionType]
+            .filter(part => typeof part === 'string' && part.length > 0)
+            .join(' · ')
+      const quota = account?.quota
+      // Every package is kept: the collapsed row carries the count and the
+      // combined total, so nothing disappears behind an invisible cut.
+      const packages = Array.isArray(quota?.packages)
+        ? [...quota.packages].sort((a, b) => (a.end ?? Number.MAX_SAFE_INTEGER) - (b.end ?? Number.MAX_SAFE_INTEGER))
+        : []
+      // The website's own usage page, under the profile the CLI login belongs
+      // to. Both regions serve it at the same path.
+      const usageLink = h('a', {
+        href: region === 'cn'
+          ? 'https://copilot.tencent.com/profile/plans-usage'
+          : 'https://www.codebuddy.ai/profile/plans-usage',
+        target: '_blank',
+        rel: 'noreferrer',
+        style: css.link,
+      }, t('usageDetail'))
+
+      return h('div', { style: css.usageCard },
+        h('div', { style: css.usageHead },
+          h('h3', { style: css.h3 }, t('codebuddyAuthTitle')),
+          h('span', { style: { ...css.note, opacity: 0.7 } }, signedIn ? t('codebuddySignedIn') : t('codebuddyNotLoggedIn')),
+          signedIn
+            ? h('button', { style: { ...css.btn, marginLeft: 'auto' }, disabled: busy, onClick: () => void loadAccount(true) }, t('usageRefresh'))
+            : null,
+        ),
+        h('div', { style: css.note }, t('codebuddyAuthHint')),
+        h('div', { style: css.usageLine },
+          h('span', { style: css.usageLabel }, t('codebuddyRegionLabel')),
+          h('select', {
+            style: css.select,
+            value: region,
+            disabled: busy,
+            onChange: event => { setRegion(event.target.value) },
+          },
+            h('option', { key: 'global', value: 'global' }, t('codebuddyRegionGlobal')),
+            h('option', { key: 'cn', value: 'cn' }, t('codebuddyRegionCn')),
+          ),
+          h('button', {
+            style: signedIn ? { ...css.btn, ...css.btnAlert } : css.btn,
+            disabled: busy || signingIn,
+            onClick: () => { if (signedIn) void logout(); else void startLogin() },
+          }, signingIn ? t('codebuddyLoggingIn') : signedIn ? t('codebuddyLogout') : t('codebuddyLogin')),
+        ),
+        signedIn
+          ? h('div', { style: css.usageLine },
+              h('span', { style: css.usageLabel }, t('usageAccount')),
+              h('span', { style: css.usageValue }, accountText),
+            )
+          : h('div', { style: css.note }, t('codebuddyLoginPrompt')),
+        signedIn
+          ? (quota === undefined
+              ? (account?.quotaError !== undefined
+                  ? h('div', { style: css.err }, `${t('codebuddyQuotaFailed')}：${account.quotaError}`)
+                  : h('div', { style: css.note }, t('codebuddyNoQuota')))
+              : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+                  h(CreditMeter, {
+                    t,
+                    label: t('codebuddyQuotaTitle'),
+                    bucket: quota,
+                    danger: quota.total > 0 && quota.used >= quota.total,
+                  }),
+                  packages.length === 0 ? null : (() => {
+                    // Same rule as the other adapters: collapsed is one summary
+                    // row (count, combined total, nearest expiry), expanded is
+                    // the per-package list.
+                    const summary = packageSummary(packages)
+                    return h('div', { style: css.packBlock },
+                      h('div', { style: css.packHead },
+                        h('span', { style: css.usageLabel }, `${t('codebuddyQuotaPackages')}（${summary.count}）`),
+                        h('span', { style: css.usageValue }, `${creditsOf(summary.total)} ${t('usageCredits')}`),
+                        summary.nearest === undefined ? null : h('span', { style: css.packExpiry }, `${t('codebuddyQuotaExpires')} ${dateLabel(summary.nearest)}`),
+                        h('button', {
+                          style: css.packToggle,
+                          onClick: () => setPacksExpanded(value => !value),
+                        }, packsExpanded ? t('codebuddyQuotaPackCollapse') : `（${t('codebuddyQuotaPackDetail')}）`),
+                      ),
+                      packsExpanded
+                        ? h('div', { style: css.packBlock },
+                            h('div', { style: css.packHead },
+                              h('span', { style: css.usageLabel }, t('codebuddyQuotaPackUsage')),
+                            ),
+                            h('div', { style: { ...css.packList, ...css.packListScroll } },
+                              packages.map((pkg, index) => h('div', {
+                                key: `${pkg.name}-${index}`,
+                                style: { ...css.packRow, ...(index === 0 ? css.packFirst : {}) },
+                              },
+                                h('span', { style: css.packLabel, title: pkg.name || '—' }, pkg.name || '—'),
+                                h('span', { style: css.packAmount }, `${creditsOf(pkg.used)} / ${creditsOf(pkg.total)}`),
+                                h('span', { style: css.packExpiry }, pkg.end === undefined ? '' : dateLabel(pkg.end)),
+                              )),
+                            ),
+                          )
+                        : null,
+                    )
+                  })(),
+                  h('div', { style: css.usageFoot },
+                    quota.cycleEnd === undefined ? null : h('span', null, `${t('codebuddyQuotaExpires')} ${dateLabel(quota.cycleEnd)}`),
+                    usageLink,
+                  ),
+                ))
+          : null,
+        signedIn && quota === undefined
+          ? h('div', { style: css.usageFoot }, usageLink)
+          : null,
+        typeof auth?.url === 'string' && signingIn
+          ? h('div', { style: css.usageLine },
+              h('a', { href: auth.url, target: '_blank', rel: 'noreferrer', style: css.link }, t('codebuddyOpenUrl')),
+              h('span', { style: css.note }, t('codebuddyLoginStarted')),
+            )
+          : null,
+        auth?.error !== undefined ? h('div', { style: css.err }, `${t('codebuddyLoginFailed')}：${auth.error}`) : null,
+        error !== undefined ? h('div', { style: css.err }, error) : null,
+      )
+    }
+
+    function minimaxSnapshot(region) {
+      const cached = readCache('minimax', `snapshot:${region}`)
+      return cached !== null && typeof cached === 'object' ? cached : undefined
+    }
+
+    function rememberMinimax(region, patch) {
+      const previous = minimaxSnapshot(region) ?? {}
+      writeCache('minimax', `snapshot:${region}`, { ...previous, ...patch, at: Date.now() })
+    }
+
+    /**
+     * MiniMax Code's account card: region, CLI install state and browser login.
+     *
+     * The login is a CLI process: `mcode login` opens the browser and writes an
+     * auth file. The card polls the host while that process runs, then re-reads
+     * the account so the model page can unlock.
+     */
+    function MinimaxCard({ ctx, t, brand, refreshSignal, onAuthChange, onRegionChange, onUsage }) {
+      const form = ctx.configForms.get(NS)
+      const subscribe = useCallback(listener => form.subscribe(listener), [form])
+      const read = useCallback(() => form.getSnapshot(), [form])
+      const snapshot = useSyncExternalStore(subscribe, read)
+      const value = snapshot?.value ?? {}
+      const configuredRegion = value.minimaxRegion === 'global' ? 'global' : 'cn'
+      const [region, setRegionState] = useState(configuredRegion)
+      const regionRef = useRef(configuredRegion)
+      const initial = minimaxSnapshot(configuredRegion)
+      const [auth, setAuth] = useState(initial?.auth)
+      const [usage, setUsage] = useState(initial?.usage)
+      const [setup, setSetup] = useState(undefined)
+      const [showLog, setShowLog] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(undefined)
+      const lastRunning = useRef(false)
+      /**
+       * The region the account reading was last requested for.
+       *
+       * A switch must re-probe the network instead of serving the previous
+       * region's cached verdict: the user changes region precisely because the
+       * machine was (or is now) on the other side of the border, and the old
+       * reading can be up to a minute stale. The first mount keeps the
+       * snapshot-first behaviour and reads from cache.
+       */
+      const lastUsageRegion = useRef(configuredRegion)
+      const signingIn = auth?.running === true
+      const signedIn = auth?.signedIn === true
+      const runningSetup = setup?.running === true
+      const installed = setup?.installed === true || usage?.installed === true
+
+      const applySnapshot = useCallback(target => {
+        const cached = minimaxSnapshot(target)
+        setAuth(cached?.auth)
+        setUsage(cached?.usage)
+      }, [])
+
+      const loadUsage = useCallback(async (fresh = false, target = regionRef.current) => {
+        try {
+          const payload = await api(`/usage?brand=minimax&region=${target}${fresh ? '&fresh=1' : ''}`, { timeout: 30_000 })
+          if (regionRef.current !== target) return
+          setUsage(payload)
+          rememberMinimax(target, { usage: payload })
+          onUsage?.(payload)
+          if (typeof payload?.signedIn === 'boolean') {
+            setAuth(previous => (previous?.running === true
+              ? previous
+              : { ...previous, running: false, region: target, signedIn: payload.signedIn }))
+          }
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setUsage({ error: String(err?.message ?? err) })
+        }
+      }, [onUsage])
+
+      const pollAuth = useCallback(async (target = regionRef.current) => {
+        try {
+          const next = await api(`/auth?brand=minimax&region=${target}`, { timeout: 10_000 })
+          if (regionRef.current !== target) return
+          setAuth(next)
+          rememberMinimax(target, { auth: next })
+          if (lastRunning.current && next.running === false) {
+            lastRunning.current = false
+            if (next.signedIn === true) {
+              await loadUsage(true, target)
+              onAuthChange?.(true)
+            }
+          }
+          if (next.running === true) lastRunning.current = true
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setError(String(err?.message ?? err))
+        }
+      }, [loadUsage, onAuthChange])
+
+      const pollSetup = useCallback(async () => {
+        try {
+          setSetup(await api('/setup?brand=minimax', { timeout: 10_000 }))
+        } catch {
+          /* a host without the installer route leaves this group empty */
+        }
+      }, [])
+
+      useEffect(() => {
+        regionRef.current = region
+        applySnapshot(region)
+        setError(undefined)
+        const switched = lastUsageRegion.current !== region
+        lastUsageRegion.current = region
+        void pollAuth(region)
+        // `fresh` drops both the 60s account cache and the 30s region-access
+        // verdict, so a switch always re-probes the network before deciding.
+        void loadUsage(switched, region)
+        void pollSetup()
+      }, [region, refreshSignal, applySnapshot, loadUsage, pollAuth, pollSetup])
+
+      useEffect(() => {
+        if (configuredRegion === regionRef.current) return
+        setRegionState(configuredRegion)
+        regionRef.current = configuredRegion
+        applySnapshot(configuredRegion)
+      }, [configuredRegion, applySnapshot])
+
+      useEffect(() => {
+        if (!signingIn) return undefined
+        const timer = setInterval(() => { void pollAuth(region) }, 1500)
+        return () => clearInterval(timer)
+      }, [signingIn, pollAuth, region])
+
+      useEffect(() => {
+        if (!runningSetup) return undefined
+        const timer = setInterval(() => { void pollSetup() }, 1200)
+        return () => clearInterval(timer)
+      }, [runningSetup, pollSetup])
+
+      useEffect(() => {
+        if (!runningSetup && setup?.code === 0) void pollAuth(region)
+      }, [runningSetup, setup?.code, pollAuth, region])
+
+      const authResolved = auth !== undefined
+      useEffect(() => {
+        if (!authResolved) return
+        onAuthChange?.(signedIn)
+      }, [authResolved, signedIn, onAuthChange])
+
+      const setRegion = useCallback(next => {
+        if (next === regionRef.current) return
+        regionRef.current = next
+        lastRunning.current = false
+        setRegionState(next)
+        applySnapshot(next)
+        setError(undefined)
+        onRegionChange?.(next)
+        void (async () => {
+          try {
+            const accepted = await withDeadline(form.set('minimaxRegion', next), WRITE_TIMEOUT_MS, t('timeout'))
+            if (accepted === false) throw new Error(t('saveFailed'))
+          } catch (err) {
+            if (regionRef.current !== next) return
+            setError(`${t('saveFailed')}：${String(err?.message ?? err)}`)
+            const fallback = form.getSnapshot()?.value?.minimaxRegion === 'global' ? 'global' : 'cn'
+            regionRef.current = fallback
+            setRegionState(fallback)
+            applySnapshot(fallback)
+            onRegionChange?.(fallback)
+          }
+        })()
+      }, [applySnapshot, form, onRegionChange, t])
+
+      const startLogin = useCallback(async () => {
+        const target = regionRef.current
+        setBusy(true)
+        setError(undefined)
+        try {
+          const next = await api('/auth', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brand: 'minimax', region: target, action: 'login' }),
+            timeout: 20_000,
+          })
+          if (regionRef.current !== target) return
+          setAuth(next)
+          rememberMinimax(target, { auth: next })
+          if (next.running === true) lastRunning.current = true
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setError(`${t('minimaxLoginFailed')}：${String(err?.message ?? err)}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [t])
+
+      const logout = useCallback(async () => {
+        if (typeof window.confirm === 'function' && !window.confirm(t('minimaxConfirmLogout'))) return
+        const target = regionRef.current
+        setBusy(true)
+        setError(undefined)
+        try {
+          const next = await api('/auth', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brand: 'minimax', region: target, action: 'logout' }),
+            timeout: 30_000,
+          })
+          if (regionRef.current !== target) return
+          setAuth(next)
+          rememberMinimax(target, { auth: next })
+          onAuthChange?.(false)
+        } catch (err) {
+          if (regionRef.current !== target) return
+          setError(`${t('minimaxLoginFailed')}：${String(err?.message ?? err)}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [onAuthChange, t])
+
+      const runSetup = useCallback(async mode => {
+        if (mode === 'uninstall' && typeof window.confirm === 'function' && !window.confirm(t('minimaxConfirmUninstall'))) return
+        setBusy(true)
+        setError(undefined)
+        setShowLog(true)
+        try {
+          setSetup(await api('/setup', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brand: 'minimax', mode }),
+            timeout: 15_000,
+          }))
+        } catch (err) {
+          setError(`${t('minimaxCliFailed')}：${String(err?.message ?? err)}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [t])
+
+      const lines = Array.isArray(setup?.lines) ? setup.lines : []
+      const setupBusy = busy || runningSetup
+      const account = usage?.account
+      const plan = usage?.plan
+      const credits = usage?.credits
+      const quotas = Array.isArray(usage?.windows) ? usage.windows : []
+      const planLabel = plan?.kind === 'token-plan'
+        ? t('minimaxPlanTokenPlan')
+        : plan?.kind === 'credits' ? t('minimaxPlanCredits') : t('minimaxPlanFree')
+      const timeLabel = ms => {
+        try {
+          return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+        } catch {
+          return String(ms)
+        }
+      }
+
+      const blocked = usage?.regionBlocked === true
+      const hasQuotaData = account !== undefined || plan !== undefined
+        || credits !== undefined || quotas.length > 0
+
+      const quotaBlock = !signedIn
+        ? h('div', { style: css.note }, installed ? t('minimaxNoUsage') : t('minimaxCliRequired'))
+        : blocked
+          ? h('div', { style: css.guide },
+              h('div', { style: css.guideText }, usage?.error ?? t('minimaxIpBlocked')),
+              h('button', {
+                style: { ...css.btn, ...css.btnAlert },
+                disabled: busy,
+                onClick: () => setRegion(region === 'global' ? 'cn' : 'global'),
+              }, region === 'global' ? t('minimaxSwitchToCn') : t('minimaxSwitchToGlobal')),
+            )
+          : usage === undefined
+            ? h('div', { style: css.note }, t('minimaxUsageLoading'))
+            : !hasQuotaData && usage?.error !== undefined
+              ? h('div', { style: css.err }, `${t('minimaxUsageFailed')}：${usage.error}`)
+              : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+                  account === undefined
+                    ? null
+                    : h('div', { style: css.usageLine },
+                        h('span', { style: css.usageLabel }, t('minimaxAccount')),
+                        h('span', { style: css.usageValue }, account?.name ?? account?.email ?? t('minimaxAccountUnknown')),
+                      ),
+                  plan === undefined
+                    ? null
+                    : h('div', { style: css.usageLine },
+                        h('span', { style: css.usageLabel }, t('minimaxPlan')),
+                        h('span', { style: css.usageValue }, plan.name ?? planLabel),
+                        plan.hasTokenPlan === true ? h('span', { style: { ...css.tag, marginLeft: '6px' } }, t('minimaxPlanTokenPlan')) : null,
+                        plan.expiresAt === undefined
+                          ? null
+                          : h('span', { style: css.note }, `${t('minimaxPlanExpires')} ${dateLabel(plan.expiresAt)}`),
+                      ),
+                  credits === undefined
+                    ? null
+                    : h('div', { style: css.usageLine },
+                        h('span', { style: css.usageLabel }, t('minimaxCredits')),
+                        h('span', { style: css.usageValue }, creditsOf(credits.remaining)),
+                        typeof credits.purchasedRemaining === 'number' && credits.purchasedRemaining > 0
+                          ? h('span', { style: css.note }, `${t('minimaxCreditsPurchased')} ${creditsOf(credits.purchasedRemaining)}`)
+                          : null,
+                        typeof credits.freeRemaining === 'number' && credits.freeRemaining > 0
+                          ? h('span', { style: css.note }, `${t('minimaxCreditsFree')} ${creditsOf(credits.freeRemaining)}`)
+                          : null,
+                      ),
+                  quotas.length === 0
+                    ? h('div', { style: css.note }, t('minimaxQuotaNone'))
+                    : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px' } },
+                        quotas.map(window => {
+                          const remaining = typeof window.remainingPercent === 'number' ? window.remainingPercent : undefined
+                          const used = remaining === undefined ? undefined : 100 - remaining
+                          return h('div', { key: window.id, style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+                            h('div', { style: css.usageLine },
+                              h('span', { style: css.usageLabel }, window.label),
+                              h('span', { style: css.usageValue }, window.unlimited
+                                ? t('minimaxQuotaUnlimited')
+                                : remaining === undefined
+                                  ? (window.remainingCount === undefined ? '—' : `${creditsOf(window.remainingCount)} / ${creditsOf(window.totalCount ?? 0)}`)
+                                  : `${t('minimaxQuotaRemaining')} ${remaining}%`),
+                              typeof window.resetAt === 'number'
+                                ? h('span', { style: css.note }, `${t('minimaxQuotaReset')} ${timeLabel(window.resetAt)}`)
+                                : null,
+                            ),
+                            used === undefined || window.unlimited
+                              ? null
+                              : h('div', { style: css.progressOuter },
+                                  h('div', {
+                                    style: {
+                                      ...css.progressInner,
+                                      width: `${used}%`,
+                                      ...(remaining !== undefined && remaining < 20 ? css.progressDanger : {}),
+                                    },
+                                  }),
+                                ),
+                          )
+                        }),
+                      ),
+                  usage?.error !== undefined ? h('div', { style: css.err }, `${t('minimaxUsageFailed')}：${usage.error}`) : null,
+                )
+      return h('div', { style: css.usageCard },
+        h('div', { style: css.usageHead },
+          h('h3', { style: css.h3 }, t('minimaxAuthTitle')),
+          h('span', { style: { ...css.note, opacity: 0.7 } },
+            blocked ? t('minimaxRegionBlockedShort') : signedIn ? t('minimaxSignedIn') : t('minimaxNotLoggedIn')),
+          signedIn
+            ? h('button', { style: { ...css.btn, marginLeft: 'auto' }, disabled: busy, onClick: () => void loadUsage(true) }, t('usageRefresh'))
+            : null,
+        ),
+        h('div', { style: css.note }, t('minimaxAuthHint')),
+        h('div', { style: css.usageLine },
+          h('span', { style: css.usageLabel }, t('minimaxRegionLabel')),
+          h('select', {
+            style: css.select,
+            value: region,
+            disabled: busy,
+            onChange: event => { setRegion(event.target.value) },
+          },
+            h('option', { key: 'cn', value: 'cn' }, t('minimaxRegionCn')),
+            h('option', { key: 'global', value: 'global' }, t('minimaxRegionGlobal')),
+          ),
+          h('button', {
+            style: signedIn ? { ...css.btn, ...css.btnAlert } : css.btn,
+            disabled: busy || signingIn || (!signedIn && !installed),
+            onClick: () => { if (signedIn) void logout(); else void startLogin() },
+          }, signingIn ? t('minimaxLoggingIn') : signedIn ? t('minimaxLogout') : t('minimaxLogin')),
+        ),
+        quotaBlock,
+        typeof auth?.expiresAt === 'number' && !blocked
+          ? h('div', { style: css.usageFoot },
+              h('span', null, tokenExpiryText(t, auth.expiresAt)),
+              h('span', { style: css.note }, t('minimaxTokenRenew')),
+            )
+          : null,
+        typeof auth?.url === 'string' && signingIn
+          ? h('div', { style: css.usageLine },
+              h('a', { href: auth.url, target: '_blank', rel: 'noreferrer', style: css.link }, t('minimaxOpenUrl')),
+              h('span', { style: css.note }, t('minimaxLoginStarted')),
+            )
+          : null,
+        auth?.error !== undefined ? h('div', { style: css.err }, `${t('minimaxLoginFailed')}：${auth.error}`) : null,
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+          h('div', { style: css.usageLine },
+            h('span', { style: css.usageLabel }, t('minimaxCliGroup')),
+            h('span', { style: css.usageValue }, installed ? t('minimaxCliInstalled') : t('minimaxCliMissing')),
+            h('button', {
+              style: { ...css.btn, marginLeft: 'auto' },
+              disabled: setupBusy,
+              onClick: () => void runSetup('install'),
+            }, runningSetup && setup?.mode === 'install' ? t('minimaxCliInstalling') : t('minimaxCliInstall')),
+            installed
+              ? h('button', {
+                  style: { ...css.btn, ...css.btnAlert },
+                  disabled: setupBusy,
+                  onClick: () => void runSetup('uninstall'),
+                }, runningSetup && setup?.mode === 'uninstall' ? t('minimaxCliUninstalling') : t('minimaxCliUninstall'))
+              : null,
+          ),
+          h('div', { style: css.note }, t('minimaxCliHint')),
+          lines.length === 0
+            ? null
+            : h('div', null,
+                h('button', {
+                  style: css.btn,
+                  onClick: () => setShowLog(value => !value),
+                }, showLog ? t('minimaxHideOutput') : t('minimaxShowOutput')),
+                showLog ? h('pre', { style: css.log }, lines.join('\n')) : null,
+              ),
+        ),
+        error !== undefined ? h('div', { style: css.err }, error) : null,
+      )
+    }
+
+    /**
+     * The model table plus the advanced block.
+     *
+     * Each change posts and then adopts the host's returned list, so the page
+     * shows what the adapter will actually do rather than what the click hoped.
+     * A per-request ticket keeps a slow earlier answer from overwriting a newer
+     * one when the user clicks quickly.
+     */
+    function SettingsPage({ ctx, t, brand }) {
+      const form = ctx.configForms.get(NS)
+      /** CodeBuddy and MiniMax both have two login regions and their own catalogs. */
+      const regional = brand.id === 'codebuddy' || brand.id === 'minimax'
+      const initialSnapshot = form.getSnapshot()?.value ?? {}
+      const initialRegion = brand.id === 'minimax'
+        ? (initialSnapshot.minimaxRegion === 'global' ? 'global' : 'cn')
+        : (initialSnapshot.codebuddyRegion === 'cn' ? 'cn' : 'global')
+      const snapshotFor = target => brand.id === 'minimax'
+        ? minimaxSnapshot(target)
+        : codeBuddySnapshot(target)
+      // Each login region has its own catalog, deny-list and windows; the page
+      // key follows the region so switching shows that region's choices.
+      const [region, setRegion] = useState(initialRegion)
+      const modelsKind = regional ? `models:${region}` : 'models'
+      const cached = readCache(brand.id, modelsKind)
+      const [models, setModels] = useState(() => Array.isArray(cached?.rows) ? cached.rows : undefined)
+      const [catalogNotice, setCatalogNotice] = useState(() =>
+        typeof cached?.notice === 'string' ? cached.notice : undefined)
+      const [signedIn, setSignedIn] = useState(() =>
+        regional
+          ? cached?.signedIn === true || snapshotFor(initialRegion)?.auth?.signedIn === true
+          : undefined)
+      const [error, setError] = useState(undefined)
+      const [status, setStatus] = useState(undefined)
+      const [busy, setBusy] = useState(false)
+      const [query, setQuery] = useState('')
+      const [onlyEnabled, setOnlyEnabled] = useState(false)
+      const [showAdvanced, setShowAdvanced] = useState(false)
+      const [usageTick, setUsageTick] = useState(0)
+      // Bumped only by a successful sign-out: the quota card must drop its
+      // stored account rather than label it "last reading".
+      const [usageReset, setUsageReset] = useState(0)
+      const ticket = useRef(0)
+      /** Separate from `ticket`: `load()` bumps that one, so sharing it would
+       *  make every write look stale the moment its own refresh landed. */
+      const writeTicket = useRef(0)
+
+      const subscribe = useCallback(listener => form.subscribe(listener), [form])
+      const read = useCallback(() => form.getSnapshot(), [form])
+      const snapshot = useSyncExternalStore(subscribe, read)
+
+      const configuredRegion = brand.id === 'minimax'
+        ? (snapshot?.value?.minimaxRegion === 'global' ? 'global' : 'cn')
+        : (snapshot?.value?.codebuddyRegion === 'cn' ? 'cn' : 'global')
+      /**
+       * The region the user just picked, until the config write lands.
+       *
+       * Without this, a snapshot that still carries the old value would pull
+       * the selection back mid-switch.
+       */
+      const pendingRegion = useRef(null)
+      useEffect(() => {
+        if (!regional) return
+        if (pendingRegion.current !== null) {
+          if (pendingRegion.current === configuredRegion) pendingRegion.current = null
+          return
+        }
+        setRegion(current => (current === configuredRegion ? current : configuredRegion))
+      }, [regional, configuredRegion, region])
+
+      const selectRegion = useCallback(next => {
+        pendingRegion.current = next
+        setRegion(next)
+      }, [])
+
+      const fields = brand.id === 'codebuddy'
+        ? {
+            disabled: region === 'cn' ? 'codebuddyCnDisabledModels' : 'codebuddyGlobalDisabledModels',
+            windows: region === 'cn' ? 'codebuddyCnModelContextWindows' : 'codebuddyGlobalModelContextWindows',
+          }
+        : brand.id === 'minimax'
+          ? {
+              disabled: region === 'cn' ? 'minimaxCnDisabledModels' : 'minimaxGlobalDisabledModels',
+              windows: region === 'cn' ? 'minimaxCnModelContextWindows' : 'minimaxGlobalModelContextWindows',
+            }
+          : brand.fields
+
+      const describeFace = ctx.configForms.describe()
+      const describeSubscribe = useCallback(listener => describeFace.subscribe(listener), [describeFace])
+      const describeRead = useCallback(() => describeFace.getSnapshot(), [describeFace])
+      const describeSnapshot = useSyncExternalStore(describeSubscribe, describeRead)
+      useEffect(() => { describeFace.ensure().catch(() => undefined) }, [describeFace])
+
+      const fetchModels = useCallback(async (fresh = false) => {
+        const regionQuery = regional ? `&region=${region}` : ''
+        const payload = await api(`/models?brand=${brand.id}${regionQuery}${fresh ? '&fresh=1' : ''}`)
+        // Never adopt a table the host answered for another login region.
+        if (regional && typeof payload?.region === 'string' && payload.region !== region) {
+          throw new Error(t(brand.id === 'minimax' ? 'minimaxRegionMismatch' : 'codebuddyRegionMismatch'))
+        }
+        return {
+          rows: Array.isArray(payload?.models) ? payload.models : [],
+          notice: typeof payload?.notice === 'string' ? payload.notice : undefined,
+          signedIn: regional ? payload?.signedIn === true : undefined,
+        }
+      }, [brand.id, regional, region, t])
+
+      /** Adopt one read and remember it for the next visit to this region. */
+      const adopt = useCallback((rows, notice, nextSignedIn) => {
+        setModels(rows)
+        setCatalogNotice(notice)
+        setSignedIn(nextSignedIn)
+        writeCache(brand.id, modelsKind, { rows, notice, signedIn: nextSignedIn, at: Date.now() })
+      }, [brand.id, modelsKind])
+
+      /** Read the list. `fresh` asks the host to drop its catalog cache first. */
+      const load = useCallback(async (fresh = false) => {
+        const requestedKind = modelsKind
+        setError(undefined)
+        const mine = ++ticket.current
+        try {
+          const { rows, notice, signedIn: nextSignedIn } = await fetchModels(fresh)
+          if (mine !== ticket.current || kindRef.current !== requestedKind) return
+          adopt(rows, notice, nextSignedIn)
+        } catch (err) {
+          if (mine !== ticket.current || kindRef.current !== requestedKind) return
+          setError(String(err?.message ?? err))
+          setModels(previous => previous ?? [])
+        }
+      }, [adopt, fetchModels, modelsKind])
+
+      /** Latest values for callbacks the account card holds across renders. */
+      const loadRef = useRef(load)
+      loadRef.current = load
+      const kindRef = useRef(modelsKind)
+      kindRef.current = modelsKind
+      /** The region of the last model read; a change forces a fresh read. */
+      const lastLoaded = useRef(undefined)
+      const refresh = useCallback(() => { void loadRef.current() }, [])
+
+      /** The last region verdict, so recovering from a block reloads the list. */
+      const blockedRegion = useRef(undefined)
+
+      /**
+       * Keep the model list in step with the region verdict.
+       *
+       * A blocked region has no readable catalog, so its remembered table is
+       * dropped. The reverse matters too: a manual refresh re-probes the
+       * network, and if the verdict flips back the list must be read again
+       * without asking the user to switch region and back.
+       */
+      const handleMinimaxUsage = useCallback(payload => {
+        if (brand.id !== 'minimax') return
+        const wasBlocked = blockedRegion.current === region
+        if (payload?.regionBlocked !== true) {
+          if (wasBlocked) {
+            blockedRegion.current = undefined
+            refresh()
+          }
+          return
+        }
+        blockedRegion.current = region
+        const notice = typeof payload.error === 'string' ? payload.error : t('minimaxIpBlocked')
+        setModels([])
+        setCatalogNotice(notice)
+        setError(undefined)
+        writeCache(brand.id, kindRef.current, { rows: [], notice, signedIn: true, at: Date.now() })
+      }, [brand.id, region, refresh, t])
+
+      /**
+       * On a region switch, paint that region's remembered table first and
+       * then verify it with the host. The read carries the region explicitly,
+       * so it stays correct even before the config write commits.
+       */
+      useEffect(() => {
+        if (regional) {
+          const saved = readCache(brand.id, modelsKind)
+          const accountSnapshot = brand.id === 'minimax'
+            ? minimaxSnapshot(region)
+            : codeBuddySnapshot(region)
+          const blocked = brand.id === 'minimax' && accountSnapshot?.usage?.regionBlocked === true
+          if (blocked) {
+            // Never paint a remembered table for a region this machine cannot reach.
+            setModels([])
+            setCatalogNotice(typeof accountSnapshot?.usage?.error === 'string'
+              ? accountSnapshot.usage.error
+              : t('minimaxIpBlocked'))
+          } else {
+            setModels(Array.isArray(saved?.rows) ? saved.rows : undefined)
+            setCatalogNotice(typeof saved?.notice === 'string' ? saved.notice : undefined)
+          }
+          // The account snapshot already knows whether this region is signed
+          // in, so the locked view does not flash while the catalog boots.
+          setSignedIn(saved?.signedIn === true || accountSnapshot?.auth?.signedIn === true)
+          setError(undefined)
+        }
+        // A switch must not be served from the host's cached catalog: the CLI
+        // only settles into the new login environment on a fresh read.
+        const switched = regional
+          && lastLoaded.current !== undefined
+          && lastLoaded.current !== region
+        lastLoaded.current = region
+        void load(switched)
+      }, [brand.id, regional, modelsKind, region, load, t])
+
+      /** Login/logout flips which catalog the page is allowed to show. */
+      const handleAuthChange = useCallback(next => {
+        if (!regional) return
+        setSignedIn(next === true)
+        if (next === true) {
+          refresh()
+          return
+        }
+        setModels([])
+        setCatalogNotice(undefined)
+        writeCache(brand.id, kindRef.current, { rows: [], notice: undefined, signedIn: false, at: Date.now() })
+      }, [brand.id, regional, refresh])
+
+      /**
+       * Re-read until the list reflects what was just written, or give up.
+       *
+       * The host commits a volatile config edit into the running plugin before
+       * it answers the write, so the first read after `set()` normally already
+       * shows the change and this returns immediately. The retries exist for the
+       * cases where it does not: a reload that briefly unpublished the route, or
+       * a host that answered ahead of its own commit. Spending them turns a
+       * transient disagreement into a short wait instead of a wrong answer.
+       *
+       * @param verify - whether the rows already show the intended change.
+       * @param attempts - how many reads to try before accepting what arrived.
+       * @returns the last rows read, or undefined when every read failed.
+       */
+      const loadUntil = useCallback(async (verify, attempts = 5) => {
+        let rows
+        const requestedKind = kindRef.current
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          try {
+            const read = await fetchModels()
+            // A region switch during the save invalidates this verification.
+            if (kindRef.current !== requestedKind) return undefined
+            rows = read.rows
+            adopt(rows, read.notice, read.signedIn)
+          } catch (err) {
+            setError(String(err?.message ?? err))
+            return undefined
+          }
+          if (verify === undefined || verify(rows)) return rows
+          await new Promise(resolve => setTimeout(resolve, 120 + attempt * 120))
+        }
+        return rows
+      }, [adopt, fetchModels])
+
+      /**
+       * Apply one change through the shared config form, then re-read until the
+       * list reflects it.
+       *
+       * The write goes through `configForms`, not the API route: that form owns
+       * the namespace's revision fence, so every change is ordered and a stale
+       * editor is refused rather than silently overwriting.
+       *
+       * `busy` is owned by the newest write alone, and is always cleared in
+       * `finally`. It must NOT be gated on the read generation: the read bumps
+       * that counter, so gating there would leave `busy` set forever and every
+       * control disabled.
+       *
+       * The host answers only after it has committed the value, so the re-read
+       * normally confirms the change on its first attempt. `verify` therefore
+       * acts as a real check rather than a wait: if the list still disagrees
+       * once the retries are spent, the change was NOT adopted and the page says
+       * so instead of reporting a save that did nothing.
+       *
+       * @param key - the config field to write.
+       * @param next - the value, or undefined to clear the field.
+       * @param verify - whether the re-read list already shows this change.
+       */
+      const write = useCallback(async (key, next, verify) => {
+        const mine = ++writeTicket.current
+        setBusy(true)
+        setStatus(t('saving'))
+        setError(undefined)
+        try {
+          const op = next === undefined ? form.unset(key) : form.set(key, next)
+          const accepted = await withDeadline(op, WRITE_TIMEOUT_MS, t('timeout'))
+          if (accepted === false) throw new Error(t('saveFailed'))
+          const rows = await loadUntil(verify)
+          if (rows !== undefined && verify !== undefined && !verify(rows)) throw new Error(t('notApplied'))
+          if (mine === writeTicket.current) setStatus(t('saved'))
+        } catch (err) {
+          if (mine !== writeTicket.current) return
+          setError(`${t('saveFailed')}：${String(err?.message ?? err)}`)
+          setStatus(undefined)
+          // The rows now hold an optimistic guess; re-read so the page shows what
+          // the host actually stored rather than what the click hoped for.
+          await load()
+        } finally {
+          if (mine === writeTicket.current) setBusy(false)
+        }
+      }, [form, load, loadUntil, t])
+
+      /**
+       * Write the whole disabled-model list, derived from the rows the user
+       * just changed, so rapid toggles cannot lose each other's edits.
+       *
+       * The row is updated locally first: the host commits the value before it
+       * answers, so the re-read confirms this instead of correcting it, and the
+       * switch never appears to snap back to where it was.
+       */
+      const writeDisabled = useCallback((rows, id, enabled) => {
+        const next = new Set(rows.filter(m => !m.enabled).map(m => m.id))
+        if (enabled) next.delete(id)
+        else next.add(id)
+        setModels(current => current?.map(m => m.id === id ? { ...m, enabled } : m))
+        return write(fields.disabled, [...next], list => list.some(m => m.id === id && m.enabled === enabled))
+      }, [fields.disabled, write])
+
+      /** Write the whole per-model window map, again showing the choice at once. */
+      const writeWindow = useCallback((rows, id, window) => {
+        const next = {}
+        for (const m of rows) if (m.override !== undefined) next[m.id] = m.override
+        if (window === undefined) delete next[id]
+        else next[id] = window
+        setModels(current => current?.map(m => m.id === id
+          ? { ...m, override: window, contextWindow: window ?? m.defaultContextWindow }
+          : m))
+        return write(
+          fields.windows,
+          next,
+          list => list.some(m => m.id === id
+            && (window === undefined ? m.override === undefined : m.override === window)),
+        )
+      }, [fields.windows, write])
+
+      /**
+       * Flip every model at once.
+       *
+       * Enabling all writes an empty deny-list rather than every id, so a model
+       * the account publishes later still defaults to on.
+       */
+      const writeAll = useCallback((enabled) => {
+        const ids = (models ?? []).map(m => m.id)
+        setModels(current => current?.map(m => ({ ...m, enabled })))
+        return write(
+          fields.disabled,
+          enabled ? [] : ids,
+          list => list.every(m => m.enabled === enabled),
+        )
+      }, [fields.disabled, models, write])
+
+      // ── CLI helper ────────────────────────────────────────────────────────
+      // The host runs the script, so the page only asks and then reads what it
+      // printed. `setup` stays undefined-shaped until the first answer arrives:
+      // a host older than this route simply never answers, and the group still
+      // renders with both buttons working.
+      const [setup, setSetup] = useState(undefined)
+      const [setupError, setSetupError] = useState(undefined)
+      const [logOpen, setLogOpen] = useState(false)
+      const logRef = useRef(null)
+
+      const pollSetup = useCallback(async () => {
+        try {
+          setSetup(await api(`/setup?brand=${brand.id}`, { timeout: 10_000 }))
+        } catch {
+          /* no run to report, or a host without the route */
+        }
+      }, [brand.id])
+
+      const startCliSetup = useCallback(async (mode) => {
+        setSetupError(undefined)
+        try {
+          setSetup(await api('/setup', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ brand: brand.id, mode }),
+            timeout: 15_000,
+          }))
+        } catch (err) {
+          setSetupError(`${t('cliStartFailed')}：${String(err?.message ?? err)}`)
+        }
+      }, [brand.id, t])
+
+      const setupRunning = setup?.running === true
+      const setupCode = setup !== undefined && setup.running === false ? setup.code : undefined
+      const setupFinishedAt = setup?.finishedAt
+      const setupLines = Array.isArray(setup?.lines) ? setup.lines : []
+      // `installed` is read from the host's own CLI lookup, so the button
+      // follows the machine rather than the last run: after an uninstall it
+      // reads false even though that run exited 0, and the page offers
+      // "install" again instead of a dead "uninstall". Until the first status
+      // arrives the old layout is kept, so opening the page does not flash an
+      // "install" button on a machine that already has the CLI.
+      const cliInstalled = setup === undefined ? true : setup.installed === true
+      const setupCancelled = setup?.cancelled === true
+
+      useEffect(() => { void pollSetup() }, [pollSetup])
+      useEffect(() => {
+        if (!setupRunning) return undefined
+        const timer = setInterval(() => { void pollSetup() }, 1200)
+        return () => clearInterval(timer)
+      }, [setupRunning, pollSetup])
+
+      /**
+       * The output panel follows the run, not the history: open while the
+       * script is alive, folded away one second after it ends. Pressing 查看
+       * 输出 brings the text back, and a finished run from before a reload is
+       * never re-expanded, because the panel starts closed.
+       */
+      useEffect(() => {
+        if (setupRunning) {
+          setLogOpen(true)
+          return undefined
+        }
+        if (setupFinishedAt === undefined) return undefined
+        const timer = setTimeout(() => setLogOpen(false), 1000)
+        return () => clearTimeout(timer)
+      }, [setupRunning, setupFinishedAt])
+
+      // The catalog is read from the CLI, so a helper that just installed,
+      // signed into, or removed it changes what the list and quota should show —
+      // and the host has already dropped its cached answers for that case.
+      useEffect(() => {
+        if (setupCode !== 0) return
+        if (setup?.mode === 'logout') {
+          // Signing out invalidates the account itself, not just its freshness:
+          // the stored catalog and quota were read through credentials that no
+          // longer exist. Drop both instead of refetching — a read now would
+          // only fail with an authentication error that looks like a fault.
+          clearCache(brand.id, modelsKind)
+          setModels([])
+          setCatalogNotice(t('modelsSignedOut'))
+          setSignedIn(regional ? false : undefined)
+          setUsageReset(value => value + 1)
+          return
+        }
+        void load(true)
+        setUsageTick(value => value + 1)
+      }, [setupCode, setupFinishedAt, setup?.mode, load, brand.id, modelsKind, regional, t])
+
+      /** Ask before running the destructive CLI action. */
+      const uninstallCli = useCallback(() => {
+        if (typeof window.confirm !== 'function') return
+        if (!window.confirm(t('cliUninstallConfirm'))) return
+        void startCliSetup('uninstall')
+      }, [startCliSetup, t])
+
+      /** Signing out is reversible, but it clears the account and quota. */
+      const logoutCli = useCallback(() => {
+        if (typeof window.confirm !== 'function') return
+        if (!window.confirm(t('cliLogoutConfirm'))) return
+        void startCliSetup('logout')
+      }, [startCliSetup, t])
+
+      useEffect(() => {
+        const node = logRef.current
+        if (node !== null) node.scrollTop = node.scrollHeight
+      }, [setupLines.length])
+
+      const all = models ?? []
+      const enabledTotal = all.filter(m => m.enabled).length
+
+      const shown = useMemo(() => {
+        const q = query.trim().toLowerCase()
+        return all.filter(m => {
+          if (onlyEnabled && !m.enabled) return false
+          if (q === '') return true
+          return String(m.name).toLowerCase().includes(q) || String(m.id).toLowerCase().includes(q)
+        })
+      }, [all, query, onlyEnabled])
+
+      const regionalLocked = regional && signedIn !== true
+      const authCard = brand.kind === 'codebuddy'
+        ? h(CodeBuddyCard, {
+            t, ctx, brand, refreshSignal: usageTick,
+            onSignedIn: () => { refresh(); setUsageTick(v => v + 1) },
+            onAuthChange: handleAuthChange,
+            onRegionChange: selectRegion,
+          })
+        : brand.kind === 'minimax'
+          ? h(MinimaxCard, {
+              t, ctx, brand, refreshSignal: usageTick,
+              onAuthChange: handleAuthChange,
+              onRegionChange: selectRegion,
+              onUsage: handleMinimaxUsage,
+            })
+          : null
+
+      // Signed out: do not read or show a catalog that the CLI would refuse.
+      if (regionalLocked) {
+        return h('div', { style: css.page },
+          h('h2', { style: css.h2 },
+          brand.id === 'global' || brand.id === 'cn'
+            ? h('img', { key: 'logo', src: QODER_LOGO, alt: 'Qoder', style: { ...css.logo, verticalAlign: 'middle', marginRight: '8px' } })
+            : null,
+          t(brand.titleKey),
+        ),
+          h('p', { style: css.intro }, t(brand.introKey)),
+          authCard,
+          h('div', { style: css.guide },
+            h('div', { style: css.guideText }, t(brand.id === 'minimax' ? 'minimaxModelsHint' : 'codebuddyModelsHint')),
+          ),
+          error !== undefined ? h('div', { style: css.err }, error) : null,
+        )
+      }
+
+      /**
+       * Red guidance for "no models", with the one action that can fix it.
+       *
+       * An empty list is almost always the machine, not the account: the CLI is
+       * missing or signed out, so the catalog has nothing to return. Pointing at
+       * the helper and offering to run it beats a grey sentence nobody reads.
+       */
+      const renderGuide = () => h('div', { style: css.guide },
+        h('div', { style: css.guideText }, t(brand.noModelsKey)),
+        brand.kind !== 'qoder'
+          ? null
+          : h('button', {
+              style: { ...css.btn, ...css.btnAlert },
+              disabled: setupRunning,
+              onClick: () => void startCliSetup('configure'),
+            }, t('cliRun')),
+      )
+
+      if (models === undefined) {
+        return h('div', { style: css.page },
+          h('h2', { style: css.h2 },
+          brand.id === 'global' || brand.id === 'cn'
+            ? h('img', { key: 'logo', src: QODER_LOGO, alt: 'Qoder', style: { ...css.logo, verticalAlign: 'middle', marginRight: '8px' } })
+            : null,
+          t(brand.titleKey),
+        ),
+          // Same leading shape as the loaded page: a differing child index
+          // remounts the account card and makes it snap back to the region the
+          // config still holds while the switch is in flight.
+          h('p', { style: css.intro }, t(brand.introKey)),
+          regional ? authCard : null,
+          error === undefined
+            ? h('div', { style: css.note }, t('loading'))
+            : h('div', null,
+                h('div', { style: css.err }, `${t('loadFailed')}：${error}`),
+                h('button', { style: { ...css.btn, marginTop: '8px' }, onClick: () => void load(true) }, t('retry')),
+                h('div', { style: { marginTop: '10px' } }, renderGuide()),
+              ),
+        )
+      }
+
+      const rows = shown.map((m, index) => {
+        const choices = Array.isArray(m.contextWindows) ? m.contextWindows : []
+        // A model the provider pins to one window has nothing to choose: the
+        // CLI rejects every other value, so a dropdown here would be a control
+        // that never reaches the upstream. Show the value instead.
+        const fixedWindow = m.contextWindowSelectable === false || choices.length === 0
+        // The default window has its own entry; repeating it in the list reads
+        // as two identical choices. A stored override equal to it still shows.
+        const offered = choices.filter(n => n !== m.defaultContextWindow || n === m.override)
+        return h('div', {
+          key: m.id,
+          style: { ...css.row, ...(index === 0 ? css.rowFirst : {}), ...(m.enabled ? {} : css.rowOff) },
+        },
+          h('input', {
+            type: 'checkbox',
+            style: css.switch,
+            checked: m.enabled === true,
+            disabled: busy,
+            title: t('colEnabled'),
+            onChange: event => { void writeDisabled(all, m.id, event.target.checked) },
+          }),
+          h('div', { style: css.name },
+            h('div', { style: css.nameText },
+              m.name,
+              m.vision === true ? h('span', { key: 'v', style: { ...css.tag, marginLeft: '6px' } }, t('vision')) : null,
+              priceSuffix(t, m.priceFactor) !== ''
+                ? h('span', { key: 'p', style: css.price }, ` · ${priceSuffix(t, m.priceFactor)}`)
+                : null,
+            ),
+            h('div', { style: css.id }, m.id),
+          ),
+          fixedWindow
+            ? h('span', {
+                style: { ...css.note, minWidth: '104px', textAlign: 'right' },
+                title: t('windowFixedHint'),
+              }, `${windowLabel(m.contextWindow ?? m.defaultContextWindow)} · ${t('windowFixed')}`)
+            : h('select', {
+                style: css.select,
+                value: m.override === undefined ? '' : String(m.override),
+                disabled: busy,
+                title: t('windowDefaultHint'),
+                onChange: event => {
+                  const value = event.target.value
+                  void writeWindow(all, m.id, value === '' ? undefined : Number(value))
+                },
+              },
+                h('option', { key: 'default', value: '' }, `${t('windowDefault')} · ${windowLabel(m.defaultContextWindow)}`),
+                offered.map(n => h('option', { key: String(n), value: String(n) }, windowLabel(n))),
+              ),
+        )
+      })
+
+      const advanced = buildAdvanced({
+        t, form, snapshot,
+        fields: ADVANCED[brand.id],
+        namespace: describeSnapshot.view?.namespaces?.find(n => n.ns === NS),
+        show: showAdvanced,
+        onToggle: () => setShowAdvanced(value => !value),
+      })
+
+      return h('div', { style: css.page },
+        h('h2', { style: css.h2 },
+          brand.id === 'global' || brand.id === 'cn'
+            ? h('img', { key: 'logo', src: QODER_LOGO, alt: 'Qoder', style: { ...css.logo, verticalAlign: 'middle', marginRight: '8px' } })
+            : null,
+          t(brand.titleKey),
+        ),
+        h('p', { style: css.intro }, t(brand.introKey)),
+        regional
+          ? authCard
+          : h(UsageCard, { t, brand, refreshSignal: usageTick, resetSignal: usageReset }),
+        brand.id === 'global' ? h(CampaignPatCard, { t, onChanged: () => setUsageTick(value => value + 1) }) : null,
+
+        // Search row: the field grows, the checkbox sits beside it.
+        h('div', { style: css.bar },
+          h('input', {
+            style: { ...css.input, ...css.search },
+            placeholder: t('search'),
+            value: query,
+            onChange: event => setQuery(event.target.value),
+          }),
+          h('label', { style: { ...css.note, display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' } },
+            h('input', { type: 'checkbox', checked: onlyEnabled, onChange: event => setOnlyEnabled(event.target.checked) }),
+            t('onlyEnabled'),
+          ),
+        ),
+
+        // Action row: all four buttons on one line, count pinned to the right.
+        // `nowrap` keeps them together; the count takes the remaining space so
+        // nothing wraps to a second line.
+        h('div', { style: { ...css.bar, flexWrap: 'nowrap' } },
+          h('button', { style: css.btn, disabled: busy, onClick: () => void load(true) }, t('refresh')),
+          h('button', {
+            style: css.btn,
+            disabled: busy || all.every(m => m.enabled),
+            onClick: () => void writeAll(true),
+          }, t('selectAll')),
+          h('button', {
+            style: css.btn,
+            disabled: busy || enabledTotal === 0,
+            onClick: () => void writeAll(false),
+          }, t('selectNone')),
+          h('span', { style: css.count }, `${t('enabledCount')} ${enabledTotal} / ${all.length}`),
+        ),
+
+        all.length === 0
+          ? renderGuide()
+          : h('div', { style: css.list }, rows.length > 0 ? rows : h('div', { style: { ...css.note, padding: '12px 14px' } }, '—')),
+
+        catalogNotice !== undefined ? h('div', { style: css.note }, catalogNotice) : null,
+        all.length > 0 ? h('div', { style: css.note }, t('windowWarn')) : null,
+        error !== undefined ? h('div', { style: css.err }, error) : null,
+        status !== undefined && error === undefined ? h('div', { style: css.note }, status) : null,
+
+        brand.kind !== 'qoder' ? null : h('div', { style: css.group },
+          h('h3', { style: css.h3 }, t(brand.cliGroupKey)),
+          h('div', { style: css.note }, t(brand.cliHintKey)),
+          // Each SDK release pins one CLI build; a mismatch kills every session
+          // with a bare exit code, so warn before the user signs in or chats.
+          setup?.versionMismatch === true
+            ? h('div', { style: { ...css.err, marginTop: '6px' } },
+                `${t('cliVersionMismatch')} ${setup.cliVersion ?? '?'} ${t('cliVersionMismatchTail')} ${setup.requiredCliVersion ?? '?'}`)
+            : null,
+          h('div', { style: { ...css.bar, flexWrap: 'nowrap' } },
+            // The primary action follows the machine: install when the CLI is
+            // gone, configure/re-login when it is there. Offering "uninstall"
+            // on a machine that has none was the confusing half of the old
+            // fixed trio.
+            cliInstalled
+              ? h('button', { style: css.btn, disabled: setupRunning, onClick: () => void startCliSetup('configure') },
+                  setup?.versionMismatch === true ? t('cliInstall') : t('cliRun'))
+              : h('button', { style: css.btn, disabled: setupRunning, onClick: () => void startCliSetup('configure') }, t('cliInstall')),
+            cliInstalled
+              ? h('button', { style: css.btn, disabled: setupRunning, onClick: () => void startCliSetup('login') }, t('cliLogin'))
+              : null,
+            cliInstalled
+              ? h('button', { style: css.btn, disabled: setupRunning, onClick: logoutCli }, t('cliLogout'))
+              : null,
+            cliInstalled
+              ? h('button', { style: { ...css.btn, ...css.btnAlert }, disabled: setupRunning, onClick: uninstallCli }, t('cliUninstall'))
+              : null,
+            // The login step waits for a browser callback; closing that tab
+            // used to leave this row spinning forever. Cancelling settles the
+            // run so the buttons come back.
+            setupRunning
+              ? h('button', {
+                  style: { ...css.btn, ...css.btnAlert },
+                  onClick: () => void startCliSetup('cancel'),
+                }, t('cliCancel'))
+              : null,
+            setupLines.length > 0 && !setupRunning
+              ? h('button', { style: css.btn, onClick: () => setLogOpen(value => !value) }, logOpen ? t('cliHideLog') : t('cliShowLog'))
+              : null,
+            h('span', { style: css.count }, setupRunning
+              ? (setup?.mode === 'uninstall'
+                  ? t('cliUninstalling')
+                  : setup?.mode === 'logout' ? t('cliLoggingOut') : t('cliRunning'))
+              : setupError !== undefined
+                ? setupError
+                : setupCancelled
+                  ? t('cliCancelled')
+                  : setupCode === 0
+                    ? (setup?.mode === 'uninstall'
+                        ? t('cliUninstallOk')
+                        : setup?.mode === 'logout' ? t('cliLogoutOk') : t('cliExitOk'))
+                    : setupCode === undefined || setupCode === null
+                      ? ''
+                      : `${t('cliExitFail')} ${setupCode}`),
+          ),
+          logOpen && setupLines.length > 0
+            ? h('pre', { ref: logRef, style: css.log }, setupLines.join('\n'))
+            : null,
+        ),
+
+        advanced,
+      )
+    }
+
+    /**
+     * The two edition switches, contributed to this bundle's page in the plugin
+     * manager (`plugins.bundle.config`).
+     *
+     * They live here rather than on either settings page because they decide
+     * whether those pages exist at all: a page cannot own the switch that
+     * removes it. The write goes through the shared config form, so it uses the
+     * same revision fence as every other setting.
+     */
+    function BundleSettings({ ctx, t, view }) {
+      const form = ctx.configForms.get(NS)
+      const subscribe = useCallback(listener => form.subscribe(listener), [form])
+      const read = useCallback(() => form.getSnapshot(), [form])
+      const snapshot = useSyncExternalStore(subscribe, read)
+      const value = snapshot?.value ?? {}
+      const writable = snapshot?.writable !== false
+      const [busy, setBusy] = useState(false)
+      const [status, setStatus] = useState(undefined)
+      const [error, setError] = useState(undefined)
+      const writeTicket = useRef(0)
+
+      const toggle = useCallback(async (key, next) => {
+        const mine = ++writeTicket.current
+        setBusy(true)
+        setStatus(t('saving'))
+        setError(undefined)
+        try {
+          const accepted = await withDeadline(form.set(key, next), WRITE_TIMEOUT_MS, t('timeout'))
+          if (accepted === false) throw new Error(t('pluginOptionsRejected'))
+          if (mine === writeTicket.current) setStatus(t('saved'))
+        } catch (err) {
+          if (mine !== writeTicket.current) return
+          setError(`${t('saveFailed')}：${String(err?.message ?? err)}`)
+          setStatus(undefined)
+        } finally {
+          if (mine === writeTicket.current) setBusy(false)
+        }
+      }, [form, t])
+
+      const labelOf = brand => {
+        const key = brand.id === 'cn'
+          ? 'displayName'
+          : brand.id === 'global'
+            ? 'intlDisplayName'
+            : brand.id === 'minimax' ? 'minimaxDisplayName' : 'codebuddyDisplayName'
+        const fallback = brand.id === 'cn'
+          ? t('nav')
+          : brand.id === 'global'
+            ? t('intlNav')
+            : brand.id === 'minimax' ? t('minimaxNav') : t('codebuddyNav')
+        const stored = value[key]
+        return typeof stored === 'string' && stored !== '' ? stored : fallback
+      }
+
+      if (view !== undefined && view !== 'page') {
+        const names = BRANDS
+          .filter(brand => value[brand.fields.enabled] !== false)
+          .map(labelOf)
+        return h('span', null, names.join(' · '))
+      }
+
+      const rows = BRANDS.map((brand, index) => {
+        const enabled = value[brand.fields.enabled] !== false
+        const name = labelOf(brand)
+        return h('div', {
+          key: brand.id,
+          style: { ...css.optionRow, ...(index === 0 ? css.optionFirst : {}) },
+        },
+          h('input', {
+            type: 'checkbox',
+            style: css.switch,
+            checked: enabled,
+            disabled: busy || !writable,
+            title: enabled ? t('pluginOptionsOn') : t('pluginOptionsOff'),
+            onChange: event => { void toggle(brand.fields.enabled, event.target.checked) },
+          }),
+          h('div', { style: css.optionText },
+            h('div', { style: css.optionName }, name),
+            h('div', { style: css.optionStatus }, enabled ? t('pluginOptionsOn') : t('pluginOptionsOff')),
+          ),
+        )
+      })
+
+      return h('div', { style: css.group },
+        h('h3', { style: css.h3 }, t('pluginOptionsTitle')),
+        h('div', { style: css.note }, t('pluginOptionsHint')),
+        rows,
+        !writable ? h('div', { style: css.note }, t('pluginOptionsReadOnly')) : null,
+        error !== undefined ? h('div', { style: css.err }, error) : null,
+        status !== undefined && error === undefined ? h('div', { style: css.note }, status) : null,
+      )
+    }
+
+    /**
+     * The collapsed advanced block: the remaining scalars, rendered against the
+     * host's schema so labels, bounds and defaults stay in one place.
+     */
+    function buildAdvanced({ t, form, snapshot, fields, namespace, show, onToggle }) {
+      const header = h('div', { style: css.bar },
+        h('button', { style: css.btn, onClick: onToggle }, show ? t('hide') : t('show')),
+        h('span', { style: css.note }, t('advancedHint')),
+      )
+      if (!show) {
+        return h('div', { style: css.group }, h('h3', { style: css.h3 }, t('advanced')), header)
+      }
+
+      const value = snapshot?.value ?? {}
+      const user = snapshot?.user
+      const schema = namespace?.schema
+      const refs = schema?.refs
+      const root = refs?.[schema?.uid]
+      const writable = snapshot?.writable !== false
+
+      const set = (key, next) => {
+        const op = next === undefined || next === ''
+          ? form.unset(key)
+          : form.set(key, next)
+        op.catch(error => {
+          console.warn(`${t('saveFailed')}：${error instanceof Error ? error.message : String(error)}`)
+        })
+      }
+
+      const rows = fields.map(([key, kind]) => {
+        const node = refs?.[root?.dict?.[key]]
+        if (node === undefined) return null
+        const labels = t('advancedFields') ?? {}
+        const help = typeof node?.meta?.description === 'string' ? node.meta.description : undefined
+        const current = value[key]
+        const overridden = user !== null && typeof user === 'object' && Object.hasOwn(user, key)
+
+        let control
+        if (kind === 'json') {
+          control = h('input', {
+            key: `${key}:${current === undefined ? '' : JSON.stringify(current)}`,
+            style: { ...css.input, fontFamily: 'ui-monospace, monospace' },
+            defaultValue: current === undefined ? '{}' : JSON.stringify(current),
+            disabled: !writable,
+            onBlur: event => {
+              try { set(key, JSON.parse(event.target.value)) } catch { /* keep the last valid value */ }
+            },
+          })
+        } else {
+          control = h('input', {
+            key: `${key}:${current === undefined ? '' : String(current)}`,
+            style: css.input,
+            type: kind === 'number' ? 'number' : 'text',
+            defaultValue: current === undefined ? '' : String(current),
+            min: node?.meta?.min,
+            max: node?.meta?.max,
+            step: node?.meta?.step,
+            disabled: !writable,
+            onBlur: event => {
+              const raw = event.target.value
+              if (raw === '') { set(key, undefined); return }
+              set(key, kind === 'number' ? Number(raw) : raw)
+            },
+          })
+        }
+
+        return h('div', { key, style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            h('span', { style: css.advLabel }, labels[key] ?? key),
+            overridden && writable
+              ? h('button', {
+                  style: { fontSize: '0.75em', opacity: 0.55, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', padding: 0, font: 'inherit', color: 'inherit' },
+                  onClick: () => set(key, undefined),
+                }, t('reset'))
+              : null,
+          ),
+          control,
+          help !== undefined ? h('div', { style: css.note }, help) : null,
+        )
+      }).filter(Boolean)
+
+      return h('div', { style: css.group },
+        h('h3', { style: css.h3 }, t('advanced')),
+        header,
+        rows,
+      )
+    }
+
+    /**
+     * Register the sections that are currently switched on, and keep that set
+     * in step with the two edition switches.
+     *
+     * A section exists only while its edition does: the plugin page's switches
+     * decide whether the settings page, its models and its fields are offered at
+     * all. They cannot be registered unconditionally and hidden, because a
+     * registered `settings.section` is exactly what puts an entry in the nav.
+     */
+    function apply(ctx) {
+      const t = ctx.locale.bind(NS)
+      ctx.effect(() => ctx.locale.register(NS, { zh, en, ja }), 'llm-qoder-cn: dictionaries')
+
+      // The two switches live on this bundle's own page in the plugin manager.
+      // That page exists whether or not either edition is currently shown.
+      ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+        name: 'plugins.bundle.config',
+        key: 'dsh-qoder-oauth',
+        locale: NS,
+      }, props => h(BundleSettings, { ...props, ctx, t }))), 'llm-qoder-cn: bundle options')
+
+      ctx.effect(() => ctx.configForms.whileServed([NS], () => {
+        const form = ctx.configForms.get(NS)
+        const live = new Map()
+
+        const sync = () => {
+          const snapshot = form.getSnapshot()
+          // Wait for the stored config before deciding what to show. Registering
+          // optimistically would flash a page the user already switched off.
+          if (snapshot.status !== 'ready') return
+          const value = snapshot.value ?? {}
+          for (const brand of BRANDS) {
+            const enabled = value[brand.fields.enabled] !== false
+            const current = live.get(brand.id)
+            if (enabled && current === undefined) {
+              live.set(brand.id, ctx.slots.inject('settings.section', () => ctx.slots.register({
+                name: 'settings.section',
+                id: brand.settingsId,
+                order: brand.order,
+                label: () => t(brand.navKey),
+                locale: NS,
+              }, props => h(SettingsPage, { ...props, ctx, t, brand }))))
+            } else if (!enabled && current !== undefined) {
+              current()
+              live.delete(brand.id)
+            }
+          }
+        }
+
+        const unsubscribe = form.subscribe(sync)
+        sync()
+        return () => {
+          unsubscribe()
+          for (const off of live.values()) off()
+          live.clear()
+        }
+      }), 'llm-qoder-cn: pages')
+    }
+
+    exports.apply = apply
+    exports.inject = inject
+    exports.name = 'dsh-qoder-oauth'
+    exports.__test = {
+      windowLabel, priceSuffix, ADVANCED, BRANDS, zh, en,
+      SettingsPage, BundleSettings, UsageCard, CodeBuddyCard, CreditMeter, creditReading, creditUnit, creditsOf, neverExpires,
+      dateLabel, tokenExpiryText, packageSummary,
+      readCache, writeCache,
+    }
+    return module.exports
+  },
+})

@@ -1,0 +1,77 @@
+/**
+ * Account quota and usage, read through the CLI's own control protocol.
+ *
+ * The SDK exposes `getUsageInfo()`, which asks the CLI to query the account's
+ * quota endpoint with the credentials the CLI already holds — the same numbers
+ * the Qoder desktop and VS Code clients show on their account panel. Doing it
+ * this way (rather than calling the endpoint ourselves) keeps token refresh,
+ * endpoint election and encryption inside the CLI, which owns them.
+ *
+ * One short-lived query is enough: no model turn runs, and the answer is cached
+ * for a minute so opening the settings page repeatedly does not spawn a CLI on
+ * every render. Failures are returned, not thrown: a page that cannot read the
+ * quota must still render the rest of its settings.
+ *
+ * @module dsh-qoder-oauth/usage
+ */
+import type { AccountInfo, UsageInfo } from '@qodercn-ai/qodercn-agent-sdk';
+import type { Live } from './live.ts';
+import type { QoderBrand } from './brand.ts';
+/** How long one quota reading stays fresh by default. */
+export declare const DEFAULT_USAGE_CACHE_TTL_MS = 60000;
+/** Upper bound on one quota round trip. */
+export declare const DEFAULT_USAGE_TIMEOUT_MS = 20000;
+/** One quota reading, successful or not. */
+export interface UsageSnapshot {
+    /** When the reading was taken. */
+    at: number;
+    /** Account quota; absent when the CLI could not answer. */
+    usage?: UsageInfo;
+    /** Signed-in account identity, when the CLI reports it. */
+    account?: AccountInfo;
+    /** Why the quota is missing, in the CLI's own words. */
+    error?: string;
+    /**
+     * Whether this edition's CLI is absent from the machine right now.
+     *
+     * The page keeps its last good reading visible while a refresh fails, which
+     * is right for a dropped network — but not after an uninstall: the account,
+     * plan and credits it shows belong to a CLI that is no longer installed.
+     * This flag tells the page to drop that reading instead of labelling it
+     * "last reading".
+     */
+    cliMissing?: boolean;
+}
+/** Cached quota reader for one brand. */
+export declare class QoderUsage {
+    private readonly brand;
+    private readonly ttlMs;
+    private readonly timeoutMs;
+    private cached;
+    private inflight;
+    /**
+     * Bumped by {@link invalidate}. A fetch that started before a sign-in may
+     * still resolve with the previous account's numbers, so it must neither be
+     * shared with later readers nor written back to the cache.
+     */
+    private epoch;
+    /**
+     * @param brand - which edition's CLI answers.
+     * @param ttlMs - how long a reading stays fresh; read per use.
+     * @param timeoutMs - how long one round trip may take.
+     */
+    constructor(brand: QoderBrand, ttlMs?: Live<number>, timeoutMs?: Live<number>);
+    /**
+     * Read the quota, or serve the cached reading while it is still fresh.
+     *
+     * @param fresh - ignore the cache; the page's refresh button.
+     * @returns the reading; `error` carries a failed lookup instead of throwing.
+     */
+    read(fresh?: boolean): Promise<UsageSnapshot>;
+    /** Drop the cached reading, including any fetch that started before now. */
+    invalidate(): void;
+    /** The reading for a machine whose CLI is not installed. */
+    private missingCli;
+    private fetch;
+    private readSnapshot;
+}

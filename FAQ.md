@@ -1,0 +1,439 @@
+# 常见问题
+
+使用中遇到的问题与历史修复记录。返回 [README](./README.md)。
+
+**登录后对话直接报 `Qoder CLI process exited with code 42`？** 这是 CLI 与插件 SDK 的版本不匹配：
+每个 SDK 发布版都钉住一个 CLI 版本，两边说的是同一条协议。CLI 1.1.81 移除了旧 SDK 的会话握手，
+旧 SDK 每次查询都会被 CLI 以退出码 42 结束（CLI 日志原文 `sdk_worker_removed: … Upgrade to the
+latest Qoder SDK version, or roll back the CLI`）。插件已把两个 SDK 升到 1.0.58（对应 CLI 1.1.81），
+并且「一键配置」现在按 SDK 清单安装**精确版本**而不是 latest。升级插件后：设置页会直接显示
+「CLI 版本与插件不匹配：本机 x，插件需要 y」，点「安装 CLI」重装即可；如果版本已经一致还报 42，
+重启 DSH Web 让新版 SDK 生效。
+
+**只启用国内版 / 只启用国际版，另一个版本没装，会不会互相影响？** 不会（这是修过的 bug）。
+`QODERCLI_PATH` 是机器级变量，不少 CN 安装会全局导出它；两个官方 SDK 又都在读到插件传的参数
+之前先看它。旧代码一旦发现它指向另一版本就判为致命错误，于是一台只装了国际版的机器，国内版
+页面即使后来装好了 `qoderclicn` 也登不进去——两个版本被这个变量绑在一起。现在查找各自只认
+自己的包与状态目录，并且会把指向另一版本的 `QODERCLI_PATH` 从**子进程环境**里删掉（中立路径
+保留）；只有本版本完全没有自己的 CLI 时，页面才会提示「那个变量属于另一版本」。两个版本的
+安装、登录、卸载因此完全独立。
+
+**卸载了 CLI，页面上还是「卸载」按钮、目录里还有残留？** 已修复。npm 只删包，会留下空的
+`node_modules/@qoder-ai`（或 `@qodercn-ai`）目录和 `qodercli.cmd` / `.ps1` 这些 shim，而插件的
+CLI 查找和页面徽标读的正是它们。现在 `--uninstall` 会在 `npm uninstall -g` 之后删掉 shim 与空
+scope 目录；页面上的「已安装」也改成每次现查机器，所以卸载后主按钮立刻变回「安装 CLI」，
+登录 / 卸载按钮只在已安装时出现。
+
+**想换账号或退出登录？** Qoder 页面在已安装 CLI 时会显示「退出登录」。Qoder CLI 本身没有 `logout`
+子命令，插件改为删除该版本加密保存的凭据（国内版 `~/.qoder-cn/.auth/user`，国际版
+`~/.qoder/.auth/user`；`machine_id` 保留）。登录和退出的成功回调都会关闭已打开的会话、清空目录与额度
+缓存，并重启 SDK daemon——daemon 在启动时就把凭据读进内存，不换掉它就会继续用上一个账号作答。
+因此换号后不会读到旧账号的额度、模型和回答；CLI 保持安装，点「重新登录」即可换号。
+
+**点「重新登录」后关掉了浏览器，页面就一直转圈？** 已修复，并新增「取消」。`qodercli login`
+会一直等浏览器回调，关掉标签页就没有返回值。现在运行中会出现「取消」按钮：点它会终止这次
+脚本、把状态标记为已取消，按钮立刻恢复，可以重新登录。
+
+**国际版页面提示「QODERCLI_PATH 指向了另一版本的 CLI」？** 只有在国际版本机完全没有自己的
+`qodercli` 时才会这样提示，属于诊断而非拦截。装好 `qodercli`（或把 `QODER_CLI_PATH` 指向它）
+即可；插件绝不会把 CN 的 CLI 借给国际版会话，因为那会拿 CN 账号作答。
+
+**额度卡片显示「无法读取额度」？** 卡片里的文字就是原因：CLI 未安装 / 未登录 / 额度接口暂时
+不可用。额度读取走的是 CLI 自己的凭证，所以先确认对应版本的 `status` 能列出用户名；点「刷新额度」
+可重试。它失败不会影响模型列表和对话。
+
+**Qoder 退出登录后，聊天里的模型选择器还列着一堆模型？** 已修复。CLI 未登录时会**成功返回一个空
+目录**（不是报错），旧代码把「空」当成「CLI 读不到」并回落到内置的 CN 套餐表，于是退出登录后选择器
+仍列满模型，选了只会失败；设置页看的是另一次读取，所以只显示空，两边不一致。现在回落到内置表只
+有一种情况：**本机装着 CLI、且这次读取还没拿到过任何回答**。CLI 没装、或账号已经明确回答过（哪怕
+回答是空），选择器就保持空。CodeBuddy 和 MiniMax 本来就有登录闸，不受影响。
+
+**CodeBuddy 页面显示「尚未登录」，但模型列表有内容？** 新版不会出现这种情况：未登录时页面只显示
+登录卡片，模型目录根本不会被读取，模型选择器也不会列出 CodeBuddy 模型。请在页面顶部选择
+「国际版」或「国内版」，点「登录」并在浏览器完成授权；登录成功后才会读取目录并显示账号与额度。
+两个区域的账号与目录独立，各自的登录也会分别保留。
+
+**切换国际版 / 国内版会卡很久吗？** 不会。下拉框会立即显示目标区域上次的账号、额度和模型表，
+再在后台校验刷新；两个区域的登录凭据分别保存在 `~/.dsh/agent-sdk-bridge/codebuddy-state.json`
+（文件权限 0600），切回已登录过的区域会直接恢复原账号，不需要重新走浏览器。该文件含明文
+bearer token，只留在本机，请不要分享或提交到仓库。从旧版本升级后，旧版本没有保存 token，
+需要给两个区域各登录一次，之后切换才会即时恢复。
+
+**切换区域后模型开关和上下文窗口会串吗？** 不会。两边的模型目录不同，开关与窗口现在按区域
+分别保存（`codebuddyGlobalDisabledModels` / `codebuddyCnDisabledModels` 与对应的窗口字段），
+切回某个区域时会恢复该区域上次的选择。旧版本只有一个全局列表，升级后不再沿用；请在国内版和
+国际版各设置一次，之后互不影响。
+
+**切到国内版 / 国际版后，列表一开始还是另一个区域的？** 已修复。根因是 CodeBuddy CLI 把
+「当前环境」记在共用的 `~/.codebuddy` 里，换区后的第一次目录读取会拿到上一个环境的列表，
+插件又把它缓存了 5 分钟。现在国内版和国际版各用一套独立的 CLI 用户目录
+（`~/.dsh/agent-sdk-bridge/codebuddy-cli/`），环境固定，启动后第一次读取就是自己的目录；
+页面切区时也会强制重新读取并核对返回的区域。升级后请重启 DSH Web 并重新加载页面。
+
+> 之前这个 bug 会把国际版的模型 ID 写进国内版的开关列表。升级后如果国内版的勾选看起来不对，
+> 在**国内版**页面对应的模型设置里点一次「全不选」，再勾选你要用的模型即可；之后两个区域
+> 互不影响。
+
+**CodeBuddy 的模型不调用工具，或者报「unknown tool Bash / ToolSearch」？** 已修复。原因是
+宿主工具没有注册进会话（首个 turn 在 MCP server 创建前就被跳过了），模型只能看到 CLI 自带的
+`Bash`/`ToolSearch`，而宿主没有这些工具。现在宿主工具会在 CLI 启动前注册，同时用
+`tools: []` 禁用 CLI 内置工具，只保留宿主通过 MCP 挂入的工具；CodeBuddy 把 MCP server 名
+规范成 `dsh_host` 的写法也已兼容。升级后重启 DSH Web 即可。
+
+**CodeBuddy 用着用着报 `Tool "mcp__dsh_host__ops_edit" does not exist in the current tool set.`？**
+已修复。这句是 **CodeBuddy CLI 自己的**话（由它的 `Tool X not found in agent Y` 改写而来），
+不是宿主说的：模型调了一个 MCP server 里并不存在的工具名。根因在本插件一边，有两层：
+
+1. **MCP server 连接时没有 `tools` 能力**。MCP SDK 的 `McpServer` 只在**第一次**
+   `registerTool` 时才安装 `tools/list` / `tools/call` 处理器并登记 `tools` 能力（带
+   `listChanged`）。本插件在 `ensureTools()` 里注册工具，而首轮宿主还没给出工具表时会以空表
+   连接——于是 server 带着「没有 tools 能力」连上去，`tools/list` 对客户端直接
+   `Method not found (-32601)`；之后模型用到的 `ops_*` 工具再来注册时，SDK 抛
+   `Cannot register capabilities after connecting to transport`，旧代码 `catch { continue }`
+   把它吞掉，工具就永远没进 `tools/list`。模型照着宿主系统提示和 `tool-addition` 块去调，
+   自然得到上面那句。现在两条 SDK 路径都在 `connect()` 之前调用
+   `setToolRequestHandlers()` 先把能力声明出来，工具于是可以随时增删。
+2. **注册只会「加」，不会「改」和「删」**。MCP SDK 对同名工具第二次 `registerTool` 直接抛
+   `Tool X is already registered`，所以切换 `dsh-ops` 模式后 schema 变了却留在旧定义上，
+   宿主撤下的工具也注销不掉。现在 `HostToolRegistry` 按名字对账：新增的注册、变了的
+   `update()` 就地更新、撤下的 `remove()`，每次变化都 `sendToolListChanged()` 通知客户端。
+   注册失败不再静默——会以 `[dsh-qoder-oauth] 宿主工具 X 未能注册进 MCP server：…`
+   打到日志，因为「工具从模型世界里消失、宿主却以为还在提供」正是这句话的来源。
+
+判据是 `test/tool-registry.test.ts`：它用真实的 `@modelcontextprotocol/sdk` 跑一个真实的
+client/server 对，钉住连接前的能力声明、以及工具集的增/改/删。
+
+**Qoder 有没有同样的问题？** 有，只是平时看不出来。Qoder 的 SDK 工厂同样是
+`createSdkMcpServer({ name, tools: [] })`，能力声明写的是
+`tools: tools.length > 0 ? {} : undefined`——空表首轮连上去同样是「没有 tools 能力」。
+它侥幸没出事只因为调用顺序：`ensureTools()` 在 CLI 启动**之前**跑，首轮只要有任意一个工具，
+SDK 就会在安装处理器时顺手把能力声明补上。第二层缺陷（只增不改不删）则一直都在：模式切换后
+schema 停在旧定义、宿主撤下的工具仍然可调，只是表现成「参数不认」和「unknown tool」，而不是
+CodeBuddy 那句显眼的报错。现在两条路径共用 `HostToolRegistry`，`prepare()` 在 `connect()`
+之前无条件声明能力。判据是 `test/qoder-session-tools.test.ts`：它构造真实的 `QoderSession`，
+在 spawn 时刻用真实 MCP client 读 `tools/list`，并在摘掉 `prepare()` 的树上验证过是红的
+（「空首轮 + 之后才出现的工具」那条尤其依赖它）。
+
+**CodeBuddy 报 `unknown tool "mcp__dsh_host__edit"` 后又说 `Tool "mcp__dsh_host__mcp__dsh_host__edit" does not exist in the current tool set.`？**
+已修复。这两句其实是**同一个 bug 的两面**，出自两个不同的地方：第一句是 **DSH** 的
+`dsh-tools`（`ToolNotFoundError`，宿主的工具表里没有这个名字），第二句是 **CodeBuddy CLI**
+自己合成的（MCP server 里没有这个名字）。模型就是在两个错误之间来回猜拼写。
+
+根因是工具名前缀只剥了**一层**。模型偶尔会发出一个已经带前缀的名字，CLI 又加了一层前缀，
+于是处理器收到 `mcp__dsh_host__mcp__dsh_host__edit`；旧实现 `slice` 一次后交给宿主
+`mcp__dsh_host__edit`——宿主的工具叫 `edit`，所以 DSH 回 `unknown tool "mcp__dsh_host__edit"`；
+模型照着这个错误改成双重拼写重试，CLI 又不认，回第二句。**一个名字剥到底就都对了。**
+
+现在 `src/mcp-naming.ts` 的 `stripMcpNamespace()` 会把每一层前缀都剥掉（并设有 8 层上限，
+纯粹由前缀组成的名字返回 null 而不是把前缀当工具名），CodeBuddy / Qoder / MiniMax 三条路径
+共用它，不再各写一份一层 `slice`。判据是 `test/mcp-naming.test.ts`，其中「双层前缀剥到
+`edit`」和「三家一致」两条在单层剥离下确认过是红的。
+
+
+**改完之后还是会报 `Tool "mcp__dsh_host__read_files" does not exist in the current tool set.`？** 也已修复，
+这是同一个症状的第三层：**模型发出的名字和 CLI 调用查找表里的名字拼写不一致**。CLI 建调用表时
+用的是注册键**原样**（过去是 `dsh-host`，于是键是 `mcp__dsh-host__read_files`），而它自己的多个
+代码路径（`parseMcpToolName`、插件工具命名、线上格式规范器）都会把服务器名里的非字母数字字符
+改写成 `_`。模型只要发出规范化拼写的 `mcp__dsh_host__read_files`——真实会话里就是这么发的——
+在 CLI 的查找表里就没有这个键，`findToolInMap` 只做大小写容错，于是在**到达本插件之前**就被
+CLI 拒了；上一轮的剥层修复（`hostToolName`）根本没机会运行。本地日志与会话记录里查不到这条
+报错，也是因为这个：报错发生在内层 CLI 里，只有截图能看到。
+
+修法是从源头消灭第二种拼写：注册键直接用 CLI 的规范形 `dsh_host`（`CODEBUDDY_MCP_SERVER_KEY`）。
+这样「模型看到的列表名 = CLI 调用表的键 = CLI 各处规范化输出」三者完全一致，无从猜错；旧的
+连字符拼写仍被 `isHostTool()` / `hostToolName()` 接受，在途的名字照常处理。判据是
+`test/codebuddy-session.test.ts`：「注册键为 `dsh_host`」与「识别 CLI 规范化拼写」两条。
+
+顺带一提：同一张截图里的 `cannot modify "…": file has not been read — read the file, then retry`
+是**另一回事**——那是 DSH 的 `dsh-tool-fs` 观测策略（`FS_NOT_OBSERVED`），要求改之前先读；
+它属于宿主侧的正常门禁，跟工具注册无关。模型当时也注意到了这一点（它说「要先 read」）。
+
+**压缩对话之后，摘要位置显示的是「上一条回复」的原文？** 已修复。压缩请求和普通对话走同一个
+LLM 接口，DSH 只是给它标上 `purpose: 'compaction'`，并在消息末尾追加一条**用户消息**作为指令
+（`Condense the conversation ABOVE into a structured checkpoint…`），期望模型执行它。
+
+三家适配器过去都用 `renderInitialFeed()` 组这条 prompt，而那是给「继续对话」用的：开头写
+「你只输出"下一条助手回复"本身」，结尾写「以上是背景。输出下一条助手回复」。于是真正的压缩
+指令被埋进「背景」，模型却收到了两次「继续对话」的指示——它就照做，把上一条助手回复又说了一遍，
+摘要位置于是成了复述。
+
+现在旁路请求统一走 `renderSideChannelFeed()`：角色说明改成「最后一条用户消息就是你要执行的
+任务」，结尾改成「请执行最后一条用户消息给出的任务」。Qoder / CodeBuddy / MiniMax 三条路径
+共用这份渲染，所以三家一起修好（MiniMax 另有一句「你只是标题与摘要助手」的 system prompt，
+曾经缓解、但没能修正自相矛盾的结尾）。判据是 `test/side-channel.test.ts`：它直接断言压缩
+prompt 里出现指令、且**不出现**「下一条助手回复」，并逐家检查适配器确实走了共享渲染。
+旧渲染下其中 4 条会红。
+
+**Qoder 的上下文环为什么也会小幅跳一下（比如从 60% 掉到 20% 又涨回来）？** 因为分母曾经会
+短暂变成 200K。Qoder 的 `context_usage_ratio` 按「CLI 实际运行的窗口」算，DSH 又用适配器上报的
+窗口当分母；目录里 `dfmodel` 等模型其实声明了 `[200K, 400K, 1M]`，你选 1M 是上游支持的。旧代码
+在目录某一刻没读到时退回静态 200K，同一会话的窗口就在 1M 与 200K 之间翻转：分母变小，压缩预算
+也从 80 万掉到约 10 万，于是一个才 10% 的会话被自动压缩，环从 60% 掉到 20% 再随历史增长爬回来。
+现在插件会记住每个模型上一次解析到的真实窗口，目录暂时读不到时继续用它；只有模型确实声明过的
+档位才会被采用（例如 `auto` 只支持 200K，存了 1M 也不会再按 1M 算）。
+
+**给 CodeBuddy 设了 1M 上下文，为什么对话里上下文环会突然变得很小、过一阵又变大？** 因为窗口
+设置过去只告诉了 DSH，没告诉 CodeBuddy 的会话。CodeBuddy 只接受模型自己声明的档位
+（`contextWindow.supportedLengths`）：国际站目录里 `deepseek-v4.1-flash` 是 `[300K, 1M]`、
+默认 **300K**，而插件按物理上限 1M 上报给 DSH。内层会话按 300K 运行，历史一旦越过 276K（92%）
+就被 CLI 紧急压缩成摘要，上下文环从几十 % 掉到 2–3 %；下一轮历史重新补齐又涨回去，看起来就像
+「每轮被重置」。现在插件会把 DSH 显示的那个窗口用 `set_config{contextWindow}` 真正下发给内层
+会话，两边分母一致；改回「默认」时会显式下发模型默认值（CLI 拒绝清空），不支持档位的模型
+（国内站全部报 `null`）页面显示「上游固定」，不再给无效下拉框。
+
+**为什么 DeepSeek 官方能让模型改图，Qoder / CodeBuddy 只会说「找不到这张图片」？** 因为像素和路径
+是两件事。图片块让模型**看见**内容，但「取反色后保存」还需要知道文件在哪；DSH 原生适配器会在图片旁
+附上只读副本的路径并提示「编辑前先复制成可写 `.png`」，桥接此前只发了像素，模型只能去工作区里瞎找。
+现在 Qoder、CodeBuddy、MiniMax 都会带上同一句路径句柄（历史上传过的图片在重建上下文时也保留），
+模型可以直接复制、处理并保存。顺带修好另一个隐患：目录某一刻读不到时，不再把视觉模型临时当成
+text-only，否则 DSH 会在适配器之前就把像素换成占位文本。
+
+**让模型看本地图片（如 `C:\pictures\9.png`）时，它为什么说看不到？** DSH 会先调用 `read_image`，
+图片放在 tool 消息里返回。Qoder / CodeBuddy / MiniMax 的工具结果走 MCP/ACP 结果通道而不是提示词，
+桥接此前在 CodeBuddy 路径上把它换成了「图片结果未转发」的文本、在 MiniMax 路径上序列化成 JSON，
+像素因此丢失。现在两条路径都会把附件解析成真正的图片块，宿主读不到时才退回带路径的句柄文本。
+升级插件并重启 DSH 后再试。
+
+**点了「登录」却没有弹出浏览器，或者弹出了两个？** CodeBuddy 的 CLI 在登录流程里会自己打开
+浏览器，插件只把登录链接显示在卡片上作为兜底，不再额外打开，所以一次登录只会有一个标签页。
+每次点击还会先清除该区域在 CLI 中缓存的旧凭据，再启动全新的授权流程；SDK 的 `authenticate()`
+只要发现本地还有 token 就会静默返回、不发登录链接，先登出即可避免「点了没反应」。若浏览器
+没有自动打开，点卡片里的「手动打开登录页」。
+
+**CodeBuddy 额度从哪来？** 官方 SDK 没有额度方法，插件用登录后的 bearer token 调用 CodeBuddy
+账号页同源的计费接口 `POST /v2/billing/meter/get-user-resource`，汇总各积分包的实时余额
+（`CycleCapacityRemainPrecise`），并显示最近到期时间。该接口未公开、可能随上游变更；读取失败时
+卡片会保留账号信息并显示原因，不影响对话。登录过期后重新登录即可；额度读取本身不会弹出浏览器。
+积分包较多时，卡片只显示一行摘要（包数、合计额度、最近到期），点右侧「详细信息」展开逐个包的
+已用 / 总额与到期时间；展开区最高 190px，可滚动，不会把所有包平铺进页面。
+
+**CodeBuddy 卡片上的「用量明细」打开什么？** 它会在新标签页打开当前登录区域的官网个人主页用量页
+（国际版 `https://www.codebuddy.ai/profile/plans-usage`，国内版
+`https://copilot.tencent.com/profile/plans-usage`），用浏览器里已有的官网登录态查看积分消耗明细。
+
+**CodeBuddy 能用企业域名 / IOA 登录吗？** 不能。插件只暴露 `global`（codebuddy.ai）与 `cn`
+（copilot.tencent.com）两种公共登录区域；SDK 里的 `ioa`、`cloudhosted`、`selfhosted` 需要企业
+端点和额外凭据，不在本插件范围内。
+
+**MiniMax Code 的 CLI 装了却启动不了？** npm 12 默认拦截安装脚本，`@minimax-ai/code` 的原生
+SQLite 依赖就在这些脚本里，普通 `npm i -g` 装出来的 `mcode` 一跑就报原生模块错误。页面上的
+「安装 / 更新 CLI」已经带上官方要求的参数：
+`--ignore-scripts=false --include=optional --allow-scripts=@minimax-ai/code,better-sqlite3
+--registry https://registry.npmjs.org/ --foreground-scripts`。手动安装时请照抄这些参数；装完
+`mcode --version` 能输出版本号才算成功。
+
+**MiniMax Code 的国内站和国际站能同时登录吗？** 不能，这是官方 CLI 的限制：已登录国内站时
+再登录国际站会提示先运行 `mcode logout`。插件不会复制、搬运或伪造另一站的凭据，只会在切换区域
+时使用该区域自己的登录态；要换站请先在原站点点「退出登录」。两个区域的模型开关与上下文窗口
+仍然分别保存，切回已登录的区域会直接恢复选择。
+
+**切模型时默认选哪一档思考强度？** 选该模型支持的最强档（有 `max` 就选 `max`，否则取它声明的
+最高档；只有 `low` / `high` 的模型取 `high`）。以前沿用上游自己的默认值，而它常常偏低：
+CodeBuddy 的 `GLM-5.3` 在可选 `max` 时仍声明默认 `high`。在高级设置里填了
+`defaultReasoningEffort` 时以它为准；该档位模型不支持时退回最强档。
+
+**切换模型或思考档位时会卡一下？** 宿主每次切换都会重新解析一次模型元数据（档位、上下文窗口、
+读图能力），而这三个 provider 的模型目录都要拉起各自的 CLI 或 ACP 进程才能读到。以前这次解析会
+等待目录刷新，缓存一过期就要等一次完整读取（Qoder 冷启动最久）。现在解析先用上一次成功读到的
+目录立刻返回，刷新在后台进行；只有从未读到过目录的第一次解析才会等待。目录自身的 TTL 与失败
+回退规则不变。
+
+**切到 MiniMax 国际站后提示「本机 IP 不在服务区域」？** 这不是登录过期，而是网络位置被拒。
+MiniMax 的边缘节点在收到跨区请求时会返回 `307`，把 `.io` 重定向到 `.minimaxi.com`（反向亦然）。
+两个域名是不同 origin，浏览器/Node 跟随重定向时 `Authorization` 头会被丢弃，于是账号接口变成空的
+`401`，CLI 自己的原始报错也只是 `401 token is required`。插件因此在读取账号和模型前先探测一次：
+只要看到指向另一站的重定向，就标记该区域不可用，显示「本机 IP 不在服务区域」并提供一键切换到
+另一站，同时清空该区域缓存的模型表；不会显示任何账号、套餐或额度假数据。判定结果缓存 30 秒；
+切换区域会同时重新读取额度与模型列表（不沿用上一个区域的结论），登录、登出或点击「刷新额度」
+也会重新探测。换好网络后如果卡片恢复正常，模型列表会自动重新加载，不需要再切一次区域。
+
+**MiniMax Code 的模型列表少了一个？** 0.6.12 的 CLI 会广告 `M3.1-Flash` 的非思考档位，但真正
+选择它时返回 `Invalid model reasoning`；插件读取目录时会逐个验证，把 CLI 实际拒绝的值过滤掉，
+只保留可用的模型。逐个验证也用于发现每个模型自己的思考档位：非思考模型没有 `thinkingEffort`，
+思考模型才有。上游修复后，新模型会自动出现，不需要改插件。
+
+**MiniMax Code 的模型为什么不直接调用宿主的工具？** ACP 没有关闭 CLI 内置工具（bash / read /
+write / glob / grep 等）的开关。插件会把「只允许 `mcp__dsh-host__*` 工具」写进系统提示；模型若
+仍尝试内置工具，插件会在执行前取消该轮并让它改用宿主工具重试。连续多次违反时本轮会明确失败，
+而不是让内置工具绕过 DSH 的权限与沙箱。
+
+**MiniMax Code 的额度从哪来？** CLI 本身有一整套账号与配额接口，插件直接复用 mcode 的登录
+凭据调用它们，因此数字与官网控制台一致：`/v1/api/user/info` 取账号，
+`/matrix/api/v1/user/get_user_extra_info` + `/matrix/api/v1/commerce/get_membership_info` 取套餐与
+积分余额，`/v1/api/openplatform/coding_plan/remains` 取 Token Plan 的 5 小时 / 每周窗口。
+前三个走签名网关（`yy` / `x-timestamp` / `x-signature`），remains 只需要 bearer token 加账号的
+`X-Group-Id`。国内站与国际站使用各自的域名，凭据也按区域读取。
+
+卡片会显示：账号名、套餐类型、剩余积分（含购买 / 赠送拆分）、以及每个窗口的剩余百分比、
+重置时间与进度条。没有 Token Plan 的账号会被 remains 接口以 `2062 no active token plan
+subscription` 拒绝，此时卡片只显示积分，不虚构窗口。额度读取失败不会影响对话，卡片会保留
+已读到的账号并给出原因；点击「刷新额度」可重试。凭据过期时先启动一次带该凭据的会话（或重新
+登录），CLI 会自动续期。
+
+**MiniMax 卡片上的「凭据到期」为什么总是今天？** 那一行显示的不是账号或套餐到期日，而是 mcode
+的 OAuth **访问令牌**有效期，它只有约 1 小时：无论什么时候打开页面，绝对日期都会落在今天，看起来
+像「今天到期」。现在这一行改成倒计时（「访问令牌剩余 58 分钟」，超过一小时改用小时），并注明 CLI
+会在下次调用时自动续期、无需重新登录；套餐自己的到期日仍单独显示为「套餐到期」。
+
+**MiniMax 回复到一半切到别的对话，再切回来报 `failed to project session`，提示
+`uncachedInputTokens` / `outputTokens` 需要整数？** 已修复。此前 MiniMax 的用量直接上报了
+按字符估算出的**小数**（例如 `1399.5`），流式时看不出问题，但 DSH 的用量投影用
+`z.number().int().nonnegative()` 校验；重新进入会话、重放这一轮时校验失败，于是整段会话都
+打不开。现在所有用量桶都会向上取整，且 `reasoningTokens` 不会超过 `outputTokens`。
+升级并重启 DSH 后可正常回到该对话；已扫描本机会话历史，没有小数用量被写入，因此不需要手工
+修复历史。
+
+**缓存命中一直显示 0%？** v1.0.5 已修。根因不在映射：CLI 每轮都算出了真实用量，但在把用量帧
+送出来之前会**主动清零四个 token 计数**（`input_tokens` / `output_tokens` /
+`cache_read_input_tokens` / `cache_creation_input_tokens`），只留 `credits` 与
+`context_usage_ratio`；它自带一个开关（env 目录里的 `EXPOSE_TOKEN_USAGE`），打开后才原样送出。
+[`src/cli.ts`](./src/cli.ts) 现在把这个开关随子进程环境一起交给 CLI——CN 包读
+`QODERCN_EXPOSE_TOKEN_USAGE`，国际包读 `QODER_EXPOSE_TOKEN_USAGE`，两个都设，因为由哪个包应答
+是查找决定的。
+
+实测（本插件跑通，同一段前缀连续两轮）：
+
+| 轮 | CLI 报的 `input_tokens` | 其中 `cache_read` | 插件上报 | 界面 |
+|---|---|---|---|---|
+| 1 | 9 811 | 0 | 输入 9 811 / 输出 860 / 缓存 0 | 命中 0% |
+| 2 | 10 686 | 9 805 | 输入 881 / 缓存读 9 805 / 输出 100 | 命中 92% |
+
+第二轮那个 `input_tokens` 是**整个 prompt**（CLI 自己的 `context_usage_ratio` 就是
+`input_tokens ÷ 窗口`），缓存的那部分含在里面，所以 [`meteredUsage()`](./src/session.ts) 把两个
+cache 桶从 `inputTokens` 里减出去——DSH 的四个桶互不重叠，不减等于把缓存前缀算两遍。四个桶（含 0）
+与 `totalTokens` 也必须齐全：harness 只在记账完整时展示每轮用量行，少一个桶又没有 `totalTokens`
+佐证，整轮的用量详情都不显示。
+
+**哪个用量帧能信？** CLI 会把用量记录挂在**好几个**帧上，
+而只有一个是真的属于「这一次请求」：`message_delta`，即每次 provider 请求结束时发出的那一帧。
+其余三个都是坑——`message_start` 与组装后的 `assistant` 消息里的四个计数**恒为 0**（请求没结束前
+没有数）；`result` 帧则是**内层整轮的总和**，把这个回合里每一次 provider 请求的用量全部相加。
+
+一个宿主 step 只对应一次 provider 请求，但内层的一"轮"要等模型不再调用工具才结束——宿主工具每往返
+一次就是一次新请求，全部发生在同一个内层回合里。所以 `result` 帧的数在长 agentic 运行后会是真实
+prompt 的若干倍：实测一个让模型连调四次工具的回合，各请求分别用 608/705/771/837，`result` 帧报
+**2 921**。若把这个数当成当前上下文，长跑结束后 DSH 的上下文计量会被顶到
+`~9.8M / 1M`（100%）并一直挂着，直到下一次取样才回正（开发中确实这么踩过一次）。
+
+现在占用样本只由 [`requestUsageSample()`](./src/session.ts) 提供：仅接受带真实计数（至少一个桶 > 0）
+的 `stream_event` 帧，`assistant` 与 `result` 帧一律不采信。`contextUsageRatio` 仍是每请求的
+prompt 比率，所以回退路径不受影响。
+
+仍然退回估算的只有三种情况：CLI 版本早于这个开关、SDK 回退到进程内 worker transport（拿不到自定义
+环境）、某一轮在结果帧之前就结束了。那时 `usage()` 按「真实用量帧 → CLI 的 context 比率 → 字符
+估算」三级回退，上游一旦有数就立刻切过去。
+
+**上下文占用是按什么算的？** 拿到真实计量时就是 provider 自己数的**最后一次请求**的 prompt：
+`inputTokens + cacheRead + cacheWrite`，除以窗口。拿不到时，上游每帧仍带 `context_usage_ratio`
+——它自己量出的「上下文用了多少」——本插件把它乘上窗口换成 token，再交给 DSH 的计量环。
+
+这条回退路径上有个坑（v1.0.1 踩过、v1.0.2 修）：**这个比率的分母是 CLI 实际运行的窗口，
+不是你配置的窗口**。
+CLI 只接受模型自己声明的窗口（见目录里的 `availableContextWindows`），配一个它不支持的窗口会被
+**静默忽略**——例如给只支持 200K 的 `auto` 配 1M，CLI 仍按 200K 跑，若拿 1M 去乘就虚高 5 倍。
+所以插件现在分两个窗口：DSH 使用你配置的值（仅当模型声明支持；不支持时忽略配置并保持模型自己的窗口），给比率做分母的是 `cliContextWindow()`
+（模型声明里匹配得上就用你的，匹配不上就用模型自己的）。同时窗口会经
+`resolveModel.parameters.contextWindow` 真正下发给 CLI——在此之前它只告诉了 DSH，CLI 一直按默认
+200K 跑，配了 1M 也白配。
+
+比率本身是**可信的**：实测在 257/1007/2257 字符三档下，`比率 × 窗口` 与 CLI 自报的
+`getContextUsage().usedPercentage` 在量化误差内一致，且随内容线性增长。注意 DSH 环上的总数
+（`inputTokens + cacheRead + cacheWrite`）**包含 qodercli 自身的开销**——它自己的系统提示、skills
+与工具定义，约 120–200 token。环里「系统提示词 / 工具定义 / 对话消息」三项是 DSH 自己按
+`4 字符/token` 估的**本地分类**，合计会低于总数，这是正常的，不是虚高。
+
+**tok/s 为什么偏低？** DSH 算 `tok/s = 输出 token ÷ 解码耗时`，而输出 token 由本插件上报。
+v1.0.5 起这个数是 provider 自己数的 `output_tokens`（同一个计量开关），所以下面的估算修正只在拿不到
+计量时生效——**凡是模型生成的内容都必须计入**，估算那一侧曾是两个原因，v1.0.3 与 v1.0.4 各修一个：
+
+1. **换算率**（v1.0.3）。实测本后端的分词器：**中文 1.77 字符/token、英文 5.20 字符/token**，
+   而原先统一按 `4 字符/token` 估，中文因此被低估 **2.26 倍**。现在按字符集分别计价。
+2. **工具调用参数**（v1.0.4）。原先只统计正文与思考，**工具调用的 name/arguments 一个字符都没算**，
+   而 agentic 回合里输出的大头正是它——实测一个三次工具调用的回合中占 **86%** 的字符。DSH 自己的
+   计量器是把工具调用计价为 `name + arguments` 的（`dsh-token-meter` 的 `estimateContent`），
+   漏掉它会让多步任务的 tok/s 低到十分之一量级。
+
+实测效果：同一段中文回复 20.9 → 45.8 tok/s；一个工具调用回合 72.5 → 311.2 tok/s。
+计数逻辑在 `src/tokens.ts` 的 `TurnOutputAccounting`，由 14 个单元测试钉住，其中一条专门断言
+「工具参数必须计入」。
+
+**设置点了没反应、一直「保存中」？** v0.6.0 已修。原因是 `.volatile()` 字段的改动**不会重启
+插件**，而适配器在挂载时把配置抄进了自己的字段，于是永远按旧值作答——写入成功、磁盘正确、
+插件读不到。详见 [开发须知](./DEVELOPMENT.md)。
+
+**回答完模型的问题、或工具调用结束后，有时等好几秒才继续，有时干脆不再回复？** v1.0.6 已修。
+根因是**工具结果的配对状态被当成了"每轮"的，而它其实是"每会话"的**。
+
+qodercli 会用两个不同身份通知同一次工具调用：`canUseTool` 先拿到它自己的 `tool_use` id，而真正
+需要宿主结果的那个 MCP `tools/call` handler **拿不到任何 id**。两者顺序一致，靠一个 FIFO 配对。
+实测（真实 CLI，1.1.68）这个 handler 会在**它所属的那一轮已经结束之后**才触发——宿主一看到工具
+调用块就立刻把结果交回来，而 CLI 过几毫秒才派发 MCP 消息：
+
+```
+6198ms  [endTurn] kind=tool-calls
+6198ms  [host] 没有 parked handler -> 缓冲在 key=call_80d292a7…
+6217ms  [mcp handler] ENTER | shift 到 toolUseId=undefined
+6217ms  [mcp handler] PARK 在 key=anonymous-1
+14226ms [mcp handler] TIMED OUT after 8009ms
+```
+
+而 `resetTurnState()` 恰恰在**每轮开始时**清空了那个 id 队列，于是把 handler 正要认领的 id 丢掉了：
+handler 落到兜底键、park 满整个 `toolResultTimeoutSeconds`（默认 **120 秒**），宿主那条结果则永远
+留在缓冲里没人读。**为什么是"有概率"**：宿主工具慢（`pwsh` 跑几秒）时 handler 在轮次结束前就
+park 好了，走的是另一条路；工具快（`read`、`ask_user_question`）时才输掉这个竞态。所以"问模型
+问题"和"工具刚结束"这两类操作最容易中招。而 120 秒远超人的耐心，表现就是"一直不回复"，只能停掉
+对话重发——重发后模型重新发一次调用，这次竞态恰好落在另一边，于是"好了"，但修的是运气不是 bug。
+
+现在配对状态由会话持有，只在**确实会取消派发**的地方丢弃：轮次被 abort / 失败时丢掉这一轮没能
+认领的通知（否则会把下一轮的 handler 挤错一个位置），会话销毁时整体释放。逻辑抽成了
+`ToolResultPairing`，由 7 条单元测试钉住；其中"快结果必须交给轮次结束后才到达的 handler"一条
+是会分辨的那条——在它与 `claim` 之间插一次 `forgetUnclaimed()`（即旧 `resetTurnState()` 在轮次
+边界做的事），它就会 park 满超时并拿到 `toolUseId=anonymous-1` 的取消文本，与线上实测的失败
+形态逐字一致。
+
+**同一个症状，换了一个原因？** v1.0.7 已修。v1.0.6 之后日志里仍能看到 120 秒超时，但这次不是配对
+丢了，而是**超时用错了对象**。
+
+宿主要等这一轮的**所有**工具执行完，才在下一次模型请求里一次性带回全部结果。所以只要有一个工具
+跑得久（构建、目录扫描、自带 300 秒预算的 `pwsh`），同批里早已完成的调用也得一起等——它的结果
+明明已经就绪，只等着随下一次请求送达。旧实现从 handler 进入时开始计 120 秒，到点就把这次调用当成
+"宿主没回"取消掉：
+
+```
+10:07:53  [mcp handler] PARK call_00_QFqbaum…   （write，结果其实立刻就有）
+10:07:53  [host]         pwsh 开始执行（自身预算 300 秒）
+10:09:53  [mcp handler] TIMED OUT after 120s    ← 把 write 误杀
+10:10:38  [host]         第一次请求到达，带着全部三条结果
+```
+
+单工具同样会中：10-20 16:41 的一次 `pwsh` 超过 120 秒，16:43 被超时取消，而宿主当时还在执行它。
+
+现在**成对调用不再有墙钟期限**：结果只可能随宿主的下一次请求到达，等多久取决于宿主工具，而不是
+一个常数。真正能判定"这次调用没人会回答"的信号也正是那次请求本身——请求边界
+（`beginHostRequest()`）会立即结算宿主没有带回结果的已 park 调用，并把尚未触发的通知标记为已作废
+（handler 之后到达时直接拿到取消结果，而不是再 park 两分钟）。只有**完全没配上对**的 handler
+（拿不到 `toolUseId`，无法把结果与调用对应）才继续用 `toolResultTimeoutSeconds` 兜底，默认仍是
+120 秒。
+
+**工具调用结束后整轮再也不回复？** v1.0.8 已修。v1.0.7 拿掉了成对调用的墙钟，但漏了一种**没人能
+来救**的情况：请求边界只结算"它运行时已经 park 好"的 handler，而**边界之后**才到达的通知它管不
+到——如果那次调用宿主压根没见过，就永远不会有人结算它，而唯一能结算它的下一次请求边界，偏偏要等
+这一轮先结束，这一轮又正卡在这个 handler 上。
+
+触发它的是一次**裸名工具调用**。内层模型偶尔不写限定名（`write` 而不是 `mcp__dsh-host__write`），
+qodercli 自己解析不到，就地判错并**不等宿主**继续跑它自己的循环——内层循环因此比宿主的轮次边界跑
+前面一轮；它随即带限定名重试，而重试的工具块落在**两次宿主请求之间的窗口**里，会话当时没有可投递
+的宿主流，块被丢弃，宿主**从未见过这次调用**，但 CLI 照样把它派发给了 MCP handler：
+
+```
+22:38:49.444 [cli]  模型以裸名 write 调用 -> Error: Tool "write" not found（就地失败，不等宿主）
+22:38:49.506 [host] 宿主照常执行 write，文件确实写出了；22:38:52.812 开下一轮
+22:38:52.786 [cli]  带限定名重试的工具块到达 -> 此刻没有宿主流 -> 丢弃（宿主从未见到）
+22:40:37.687 [mcp handler] PARK call_2b54e8a6…   ← 没有任何请求会为它带回结果
+22:48:24.594 [user] 点停止 -> CLI 取消挂起的工具调用，轮次才解开（实测静默 572 秒）
+```
+
+现在 `claim()` 在 park 之前先确认**这次调用宿主确实见过**（`hostVisible`：适配器真的把工具块投递
+给宿主的那些 id）。宿主没见过的 id 立即拿到与请求边界相同的取消文本，不再空等；宿主见过的调用依旧
+**没有墙钟**，`pwsh` 跑几分钟照样等它的真实结果。判别性的一条测试是「宿主从未见过的调用要立即失
+败」——修复前它会 park 满 600 秒（测试超时失败），修复后立刻返回取消结果。

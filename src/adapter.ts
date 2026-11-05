@@ -1,0 +1,862 @@
+/**
+ * `QoderAdapter`: route the harness LLM seam onto a local Qoder CLI account
+ * through the qoder-agent-sdk. One warm inner session per host session id
+ * carries the conversation (model turns and tool rounds live inside it); host
+ * tool schemas are exposed to the inner model through an in-process MCP
+ * server whose handlers park until the host delivers tool results on the next
+ * request. Side-channel requests (titles, compaction) run cold one-shots.
+ * @module dsh-llm-qoder/adapter
+ */
+
+import { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo,
+  PreparedAdapterCall, RequestMessage, StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { QoderBrand } from './brand.ts'
+import { brandProfile } from './brand.ts'
+import {
+  DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, QODER_MODELS, resolveQoderModelId,
+} from './catalog.ts'
+import type { ResolvedConfig } from './config.ts'
+import type { Live } from './live.ts'
+import { readLive, readLiveOptional } from './live.ts'
+import { DEFAULT_MODEL_CACHE_TTL_MS, DEFAULT_FETCH_TIMEOUT_MS, QoderModelCatalog } from './models.ts'
+import { cachedModels } from './model-cache.ts'
+import { feedImageRefs, feedToText, imageRefText, imageRefs, joinFeeds, renderInitialFeed, renderRefreshed, renderSideChannelFeed, renderUserTurn } from './render.ts'
+import type { Feed, ImagePathResolver } from './render.ts'
+import { QoderSession, QoderSessionManager, DEFAULT_MAX_SESSIONS } from './session.ts'
+import type { ChannelContent, ResolvedImages, SessionModelPolicy } from './session.ts'
+import { discardSdk } from './sdk.ts'
+import type { UsageSnapshot } from './usage.ts'
+import { QoderUsage } from './usage.ts'
+
+/**
+ * Read one durable image occurrence into the bytes a request sends.
+ * Implemented over `ctx.attachments`; returns undefined when the object is
+ * unreadable, which degrades that one image instead of failing the turn.
+ */
+export type ImageRequestReader = (
+  ref: ImageAttachmentRef,
+  signal?: AbortSignal,
+) => Promise<{ bytes: Uint8Array, mediaType: string } | undefined>
+
+/**
+ * Options for {@link QoderAdapter}.
+ *
+ * Most values are {@link Live}: a plain value, or a thunk the adapter calls
+ * where it uses the option. The plugin passes thunks over its volatile config
+ * cells, because a settings edit is committed in place without restarting the
+ * plugin (`src/live.ts`) — an adapter that copied these into fields would keep
+ * serving the values it was constructed with.
+ */
+export interface QoderAdapterOptions {
+  /** Maximum simultaneously warm inner sessions (default 8). */
+  maxSessions?: Live<number>
+  /** How long a fetched CLI model catalog stays fresh (default 5 min). */
+  modelCacheTtlMs?: Live<number>
+  /** Request-image reader; absent → images are never forwarded as pixels. */
+  readImage?: ImageRequestReader
+  /**
+   * The tool-world path of one image, for the handle text that lets the model
+   * edit it. Absent → an unreadable image keeps the harness placeholder.
+   */
+  imagePath?: ImagePathResolver
+  /** How long an unpaired MCP tool handler waits before failing its call. */
+  toolResultTimeoutMs?: Live<number>
+  /** How long the inner process gets to acknowledge an abort. */
+  abortGraceMs?: Live<number>
+  /** Maximum inner turns for one side-channel request. */
+  coldMaxTurns?: Live<number>
+  /** How long one CLI catalog fetch may take before the static fallback. */
+  catalogFetchTimeoutMs?: Live<number>
+  /**
+   * Per-model context window in tokens, keyed by Qoder model id. A model with
+   * no entry uses the window upstream declares for it.
+   */
+  modelContextWindows?: Live<Readonly<Record<string, number>>>
+  /** Output-token cap assumed when a model reports none. */
+  defaultMaxTokens?: Live<number>
+  /** Model ids switched off; hidden from the picker. */
+  disabledModels?: Live<readonly string[]>
+  /** Extra harness-id → Qoder-id aliases, merged over the built-in ones. */
+  modelAliases?: Live<Readonly<Record<string, string>>>
+  /** Reasoning effort used when a request names none. */
+  defaultReasoningEffort?: Live<string | undefined>
+  /** Display name of the primary provider group. */
+  displayName?: Live<string>
+  /** Which edition this adapter serves; defaults to the CN one. */
+  brand?: QoderBrand
+  /** How long one quota reading stays fresh; read per use. */
+  usageCacheTtlMs?: Live<number>
+}
+
+/** Shared empty values, so an unset list or map allocates nothing per read. */
+const NO_MODELS: readonly string[] = []
+const NO_WINDOWS: Readonly<Record<string, number>> = {}
+const NO_ALIASES: Readonly<Record<string, string>> = {}
+
+/** The primary provider route (the CN account's own models). */
+export const QODER_PROVIDER = 'qoder-cn'
+/** The international edition's route; a second adapter instance serves it. */
+export const QODER_INTL_PROVIDER = 'qoder-intl'
+
+/** The window facts one live catalog entry carries. */
+export type WindowFacts = {
+  maxInputTokens?: number
+  defaultContextWindow?: number
+  availableContextWindows?: readonly number[]
+}
+
+/**
+ * Decide the context window to report for one live model.
+ *
+ * A per-model override wins when the user chose one; otherwise upstream's own
+ * `defaultContextWindow` is used, which is the window that model's session
+ * actually runs with. `maxInputTokens` is NOT a substitute — it is the ceiling
+ * for a single request and is often lower than the session window (e.g. 180 000
+ * against a 200 000 session), so falling back to it would understate capacity.
+ * Callers that accept a user override should validate it against
+ * `availableContextWindows` first — see {@link resolveDeclaredWindow}.
+ *
+ * @param live - the live catalog entry, when the CLI answered.
+ * @param override - the user's chosen window for this model, if any.
+ * @param fallback - window used when the catalog has nothing for this model.
+ * @returns the window in tokens.
+ */
+export function pickContextWindow(
+  live: WindowFacts | undefined,
+  override: number | undefined,
+  fallback: number,
+): number {
+  if (override !== undefined && Number.isFinite(override) && override > 0) return override
+  if (live === undefined) return fallback
+  return live.defaultContextWindow
+    ?? largestWindow(live.availableContextWindows)
+    ?? live.maxInputTokens
+    ?? fallback
+}
+
+/** The largest window in a catalog entry's selectable list, or undefined. */
+function largestWindow(available: readonly number[] | undefined): number | undefined {
+  if (available === undefined || available.length === 0) return undefined
+  return Math.max(...available)
+}
+
+/**
+ * The window the CLI will actually run this route with.
+ *
+ * Not the same thing as the window the harness is told about. A deployment may
+ * declare any window it likes — `modelContextWindows` accepts arbitrary numbers
+ * — but the CLI only honours one the model advertises in
+ * `availableContextWindows`; anything else it silently ignores and keeps its own
+ * default. Since the CLI measures `context_usage_ratio` against the window it is
+ * really using, this is the only correct multiplier for that ratio: using the
+ * declared window instead inflates every reading by
+ * `declared / actually-honoured` (5x for a 1M override on a 200K-only model).
+ *
+ * @param live - the live catalog entry, when the CLI answered.
+ * @param declared - the window this route publishes to the harness.
+ * @returns the window the CLI runs with, or undefined when unknown.
+ */
+export function cliContextWindow(live: WindowFacts | undefined, declared: number): number | undefined {
+  if (live === undefined) return undefined
+  const available = live.availableContextWindows
+  if (available !== undefined && available.includes(declared)) return declared
+  return live.defaultContextWindow ?? largestWindow(available) ?? live.maxInputTokens
+}
+
+/**
+ * The window to publish for one route, which is also the one the CLI is told
+ * to run with.
+ *
+ * A live entry is authoritative: the user's override counts only when the
+ * model advertises it. The CLI silently ignores anything else (a 1M choice on
+ * a 200K-only route), and dividing by it would understate every reading
+ * fivefold. When the catalog is momentarily unavailable, the last successful
+ * answer is reused instead of the static 200K default — that fallback used to
+ * change the denominator, and the compaction budget, mid-session: a 1M
+ * conversation read 1M one turn and 200K the next, and then compacted at what
+ * looked like 10%.
+ */
+export function resolveDeclaredWindow(
+  live: WindowFacts | undefined,
+  override: number | undefined,
+  remembered: number | undefined,
+  fallback: number,
+): number {
+  if (live === undefined) return remembered ?? override ?? fallback
+  const available = live.availableContextWindows
+  const honored = override !== undefined
+    && (available === undefined || available.length === 0 || available.includes(override))
+  return pickContextWindow(live, honored ? override : undefined, remembered ?? fallback)
+}
+
+function modelInfo(provider: string, entry: { id: string, name: string, description?: string, isVl?: boolean }): LlmModelInfo {
+  return {
+    provider,
+    id: entry.id,
+    name: entry.name,
+    ...entry.description === undefined ? {} : { description: entry.description },
+    inputModalities: entry.isVl === true ? ['text' as const, 'image' as const] : ['text' as const],
+  }
+}
+
+/**
+ * Default selectable reasoning efforts for a Qoder model. The CLI catalog
+ * reports per-model `efforts`; this is the fallback when a model (or the
+ * static catalog) discloses none.
+ */
+const DEFAULT_REASONING_EFFORTS = ['low', 'medium', 'high', 'max'] as const
+
+/** Human display name for the default effort ids. */
+const EFFORT_NAMES: Readonly<Record<string, string>> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  max: 'Max',
+}
+
+/**
+ * Strength order used to pick a model's starting level.
+ *
+ * The three providers spell their levels differently (Qoder publishes
+ * `low|medium|high|max`, MiniMax `low|high`, CodeBuddy whatever its catalog
+ * declares), so the ranking is by name rather than by position in any one
+ * upstream list. An id outside this table ranks below every known one, which is
+ * what several sources agreeing on an unfamiliar spelling should do.
+ */
+const EFFORT_ORDER: readonly string[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/**
+ * The strongest level a model offers.
+ *
+ * Switching model or level must start at the most capable setting the route
+ * accepts, the same rule the sibling adapter plugin uses; the previous
+ * behaviour of following upstream's own default meant some models silently
+ * started one or two steps down (`CodeBuddy` advertises `high` as its default
+ * even when `max` is selectable).
+ *
+ * @param efforts - the levels the route accepts, in upstream order.
+ * @returns the strongest id, or undefined for a non-reasoning model.
+ */
+export function strongestEffort(efforts: readonly string[]): string | undefined {
+  if (efforts.length === 0) return undefined
+  let best: string | undefined
+  let bestRank = -1
+  for (const effort of efforts) {
+    // First occurrence wins a tie, which keeps an upstream-ordered list stable
+    // when it repeats a level.
+    const rank = EFFORT_ORDER.indexOf(effort)
+    if (best === undefined || rank > bestRank) {
+      best = effort
+      bestRank = rank
+    }
+  }
+  return best
+}
+
+/**
+ * Build the `reasoning` metadata block for a resolved model, or undefined
+ * when the model does not support reasoning.
+ *
+ * The starting level is the strongest one the model accepts, not the level
+ * upstream happens to name as its default: the user's explicit choice in the
+ * sibling plugin, applied here too. An explicit configuration value still wins
+ * when the model accepts it.
+ *
+ * @param efforts - CLI-reported effort ids (absent for reasoning-less models).
+ * @param configuredEffort - user-configured starting level, when any.
+ * @param isReasoning - whether the model supports reasoning per the CLI.
+ * @returns the harness reasoning metadata, or undefined to omit it.
+ */
+export function reasoningInfo(
+  efforts: readonly string[] | undefined,
+  configuredEffort: string | undefined,
+  isReasoning: boolean | undefined,
+): LlmModelReasoningInfo | undefined {
+  if (efforts === undefined && isReasoning === false) return undefined
+  const ids = efforts !== undefined && efforts.length > 0
+    ? efforts
+    : DEFAULT_REASONING_EFFORTS
+  const defaultEffort = configuredEffort !== undefined && ids.includes(configuredEffort)
+    ? configuredEffort
+    : strongestEffort(ids)
+  return {
+    efforts: ids.map(id => ({
+      id: ReasoningEffortId(id),
+      name: EFFORT_NAMES[id] ?? id,
+    })),
+    ...defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultEffort) },
+  }
+}
+
+/** One adapter dispatch generation: the metadata the harness saw, plus what it implies. */
+interface CallGeneration {
+  readonly info: LlmResolvedModelInfo
+  /** Whether the resolved route accepts image input, per that same resolution. */
+  readonly vision: boolean
+  /**
+   * The window the CLI will run this route with. Distinct from
+   * `info.context.contextWindow`, which is what the harness was told; the two
+   * differ when the declared window is one the model does not advertise.
+   */
+  readonly cliContextWindow: number | undefined
+}
+
+/**
+ * The Qoder-backed adapter. Session continuity, tool parking, and feed
+ * planning live here; chunk synthesis lives in the session's consumer.
+ */
+export class QoderAdapter extends LlmAdapter {
+  /**
+   * The options as given, read where they are used rather than copied here.
+   *
+   * A `.volatile()` field is a live cell DSH updates in place, and such an edit
+   * does not restart the plugin, so a value captured in the constructor would
+   * stay frozen for the lifetime of the process (see `src/live.ts`).
+   */
+  private readonly options: QoderAdapterOptions
+  private readonly sessions: QoderSessionManager
+  private readonly catalog: QoderModelCatalog
+  private readonly usage: QoderUsage
+  private readonly readImage: ImageRequestReader | undefined
+  private readonly imagePath: ImagePathResolver | undefined
+  private readonly brand: QoderBrand
+  /**
+   * Memoized `Set` view of the disabled-model list.
+   *
+   * `updateVolatile` stores the freshly parsed array, so identity changes only
+   * when the value does: caching on that identity keeps the per-model lookup a
+   * hash probe instead of rebuilding a set per call, with no staleness.
+   */
+  private disabledCache: { source: readonly string[], set: ReadonlySet<string> } | undefined
+  /**
+   * The last window each route resolved to, plus what the model advertised.
+   *
+   * Reused only when a live entry is missing. Without it a failed refresh fell
+   * back to the static 200K, so a 1M session suddenly declared 200K: the ring
+   * denominator changed and the compaction engine budgeted against 200K,
+   * compacting a history that was still only ~10% of the real window.
+   */
+  private readonly knownWindows = new Map<string, { window: number, available?: readonly number[] }>()
+  /**
+   * Last verified image capability per route.
+   *
+   * A missed catalog refresh used to fall back to text-only, and DSH then
+   * stripped the pixels before this adapter ran: a vision model silently lost
+   * the image for that turn. Remembering the last answer keeps the declared
+   * capability stable across a transient miss.
+   */
+  private readonly knownVision = new Map<string, boolean>()
+
+  constructor(options: QoderAdapterOptions = {}) {
+    super()
+    this.options = options
+    this.brand = options.brand ?? 'cn'
+    this.sessions = new QoderSessionManager(options.maxSessions ?? DEFAULT_MAX_SESSIONS, {
+      toolResultTimeoutMs: options.toolResultTimeoutMs,
+      abortGraceMs: options.abortGraceMs,
+      coldMaxTurns: options.coldMaxTurns,
+      brand: this.brand,
+    })
+    this.catalog = new QoderModelCatalog(
+      this.brand,
+      options.modelCacheTtlMs ?? DEFAULT_MODEL_CACHE_TTL_MS,
+      options.catalogFetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
+    )
+    this.usage = new QoderUsage(this.brand, options.usageCacheTtlMs)
+    this.readImage = options.readImage
+    this.imagePath = options.imagePath
+  }
+
+  private get defaultMaxTokens(): number {
+    return readLive(this.options.defaultMaxTokens, DEFAULT_MAX_TOKENS)
+  }
+
+  private get modelContextWindows(): Readonly<Record<string, number>> {
+    return readLive(this.options.modelContextWindows, NO_WINDOWS)
+  }
+
+  private get disabledModels(): ReadonlySet<string> {
+    const source = readLive(this.options.disabledModels, NO_MODELS)
+    const cached = this.disabledCache
+    if (cached !== undefined && cached.source === source) return cached.set
+    const set = new Set(source)
+    this.disabledCache = { source, set }
+    return set
+  }
+
+  private get modelAliases(): Readonly<Record<string, string>> {
+    return readLive(this.options.modelAliases, NO_ALIASES)
+  }
+
+  private get defaultReasoningEffort(): string | undefined {
+    return readLiveOptional(this.options.defaultReasoningEffort)
+  }
+
+  private get displayName(): string {
+    return readLive(this.options.displayName, brandProfile(this.brand).defaultDisplayName)
+  }
+
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: this.displayName }
+  }
+
+  /**
+   * Whether one catalog entry is enabled for the picker.
+   *
+   * Only the user's off-switch is consulted: a model the account adds later
+   * appears enabled by default, which a stored allow-list could not do.
+   */
+  private isVisible(id: string): boolean {
+    return !this.disabledModels.has(id)
+  }
+
+  /**
+   * The user's chosen window for one catalog id, honouring aliases.
+   *
+   * A window may be stored under either the Qoder id or a harness-side alias,
+   * so both spellings are checked before giving up.
+   */
+  private windowOverride(id: string): number | undefined {
+    const direct = this.modelContextWindows[id]
+    if (direct !== undefined) return direct
+    for (const [key, value] of Object.entries(this.modelContextWindows)) {
+      if (resolveQoderModelId(key, this.modelAliases) === id) return value
+    }
+    return undefined
+  }
+
+  // ── Accessors for the settings API ──────────────────────────────────────
+  // The page needs the raw catalog plus the user's stored choices; these expose
+  // exactly that without leaking the adapter's internals.
+
+  /**
+   * The live catalog as the page renders it.
+   *
+   * Unlike {@link listModels}, this is not filtered by the user's on/off
+   * choices: the page must show a switched-off model in order to switch it
+   * back on.
+   *
+   * @returns live catalog entries in upstream order.
+   */
+  async describeCatalog(): Promise<Awaited<ReturnType<QoderModelCatalog['liveModels']>>> {
+    const live = await this.catalog.liveModels()
+    // Seed the remembered windows and capabilities here too, so the settings
+    // page's rows and the request path validate against the same catalog.
+    for (const entry of live) {
+      this.declaredWindow(entry.value, entry)
+      this.knownVision.set(entry.value, entry.isVl === true)
+    }
+    return live
+  }
+
+  /** Forget the cached catalog; the next read asks the CLI again. */
+  invalidateCatalog(): void {
+    this.catalog.invalidate()
+  }
+
+  /** Why the last catalog refresh failed, for the settings page's guidance. */
+  catalogError(): string | undefined {
+    return this.catalog.error
+  }
+
+  /**
+   * Read the account's quota and usage, as the Qoder clients display it.
+   *
+   * @param fresh - ignore the cached reading.
+   */
+  async usageInfo(fresh = false): Promise<UsageSnapshot> {
+    return this.usage.read(fresh)
+  }
+
+  /** Forget the cached quota reading; the next read asks the CLI again. */
+  invalidateUsage(): void {
+    this.usage.invalidate()
+  }
+
+  /**
+   * Forget everything that was read under the account that just left.
+   *
+   * Signing in or out replaces the credentials on disk, but the SDK daemon and
+   * every warm session loaded the old ones when they started, and the catalog
+   * and quota caches describe that same old account. Signing out has to drop
+   * the sessions; signing in has to drop all four, or the page keeps showing
+   * the previous account until the process restarts.
+   */
+  resetAccount(): void {
+    this.catalog.invalidate()
+    this.usage.invalidate()
+    this.sessions.closeAll()
+    discardSdk(this.brand)
+  }
+
+  /** Whether the user switched one model off. */
+  isModelDisabled(id: string): boolean {
+    return this.disabledModels.has(id)
+  }
+
+  /** The stored disabled-model set, as a list for rewriting the field. */
+  disabledModelIds(): readonly string[] {
+    return [...this.disabledModels]
+  }
+
+  /**
+   * The user's window for one model, when the provider accepts it.
+   *
+   * A stored choice the model does not advertise is not a real choice: the CLI
+   * ignores it and keeps its own window, so publishing it would only make the
+   * meter divide by a capacity the route never runs with. Until the catalog
+   * has answered once the choice is trusted (there is nothing to check yet).
+   */
+  contextWindowFor(id: string): number | undefined {
+    const override = this.windowOverride(id)
+    if (override === undefined) return undefined
+    const target = resolveQoderModelId(id, this.modelAliases)
+    const available = this.knownWindows.get(target)?.available
+    if (available === undefined || available.length === 0) return override
+    return available.includes(override) ? override : undefined
+  }
+
+  /** The window this route publishes, remembering it for catalog misses. */
+  private declaredWindow(id: string, live: WindowFacts | undefined): number {
+    const window = resolveDeclaredWindow(
+      live,
+      this.windowOverride(id),
+      this.knownWindows.get(id)?.window,
+      DEFAULT_CONTEXT_WINDOW,
+    )
+    if (live !== undefined) this.knownWindows.set(id, { window, available: live.availableContextWindows })
+    return window
+  }
+
+  /** The stored per-model window map, for rewriting the field. */
+  modelWindowChoices(): Readonly<Record<string, number>> {
+    return this.modelContextWindows
+  }
+
+  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    // One route, one list: the account's official models as the CLI reports
+    // them, minus whatever the user switched off.
+    const cliModels = await this.catalog.models()
+    return cliModels
+      .filter(entry => this.isVisible(entry.id))
+      .map(entry => modelInfo(provider, entry))
+  }
+
+  override async resolveModel(
+    provider: string,
+    model: string,
+    _signal?: AbortSignal,
+  ): Promise<LlmResolvedModelInfo> {
+    // The host may address a model by a `deepseek-v4-*` alias or a `qoder-`
+    // prefixed id, while the CLI catalog is keyed by the SDK value. Resolve the
+    // address to find the metadata, but echo the requested id back: the seam
+    // rejects an exact-model result whose id differs from the one asked for.
+    const target = resolveQoderModelId(model, this.modelAliases)
+    // The picker resolves on every switch and every level change. Awaiting the
+    // CLI catalogue here (a cold start, up to the fetch timeout) froze the menu
+    // whenever the cache had just expired, so a snapshot answers immediately and
+    // the refresh runs behind it.
+    const live = (await cachedModels(this.catalog.snapshot(), () => this.catalog.liveModels()))
+      .find(entry => entry.value === target)
+    if (live !== undefined) {
+      const vision = live.isVl === true
+      this.knownVision.set(target, vision)
+      const reasoning = reasoningInfo(live.efforts, this.defaultReasoningEffort, live.isReasoning)
+      return {
+        provider,
+        id: model,
+        name: live.displayName.length > 0 ? live.displayName : live.value,
+        ...live.description.length > 0 ? { description: live.description } : {},
+        // Only an affirmative CLI `isVl` declares image input. The harness
+        // projects images to handle text for a route that omits it, so a claim
+        // the CLI did not make would silently drop pixels; the reverse error
+        // would send pixels to a model that cannot read them.
+        inputModalities: vision ? ['text' as const, 'image' as const] : ['text' as const],
+        context: {
+          // The compaction engine and context meter price against the window a
+          // request actually uses. Upstream reports three different numbers
+          // (per-request ceiling, effective session window, and the list of
+          // selectable windows); `pickContextWindow` prefers the user's choice,
+          // then upstream's own session window. Reporting a window larger than
+          // the session really runs with would push the auto-compaction
+          // threshold past what the provider accepts.
+          contextWindow: this.declaredWindow(target, live),
+        },
+        defaultMaxTokens: live.maxOutputTokens ?? this.defaultMaxTokens,
+        ...reasoning === undefined ? {} : { reasoning },
+      }
+    }
+    // The static catalog describes the CN plan only; an intl route whose live
+    // catalog is unreachable must not borrow model ids the account may not have.
+    const configured = brandProfile(this.brand).staticCatalog
+      ? QODER_MODELS.find(entry => entry.id === target)
+      : undefined
+    const reasoning = reasoningInfo(undefined, this.defaultReasoningEffort, true)
+    // The live catalog is momentarily unavailable. Reuse the last verified
+    // capability rather than declaring text-only, which would make the harness
+    // drop pixels from a vision model for this turn.
+    const rememberedVision = this.knownVision.get(target) === true
+    return Promise.resolve({
+      ...configured === undefined
+        ? { provider, id: model, name: model }
+        : { ...modelInfo(provider, configured), id: model },
+      inputModalities: rememberedVision ? ['text' as const, 'image' as const] : ['text' as const],
+      context: {
+        contextWindow: this.declaredWindow(target, undefined),
+      },
+      defaultMaxTokens: this.defaultMaxTokens,
+      ...reasoning === undefined ? {} : { reasoning },
+    })
+  }
+
+  /**
+   * Bind one resolution generation to its dispatch, as the seam requires of a
+   * dynamic adapter: the live catalog and the CLI login can change between the
+   * harness preparing a call and the inner session running it, and a turn must
+   * not mix one generation's declared capabilities with another's endpoint.
+   */
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const generation = await this.capture(provider, model, signal)
+    return {
+      model: generation.info,
+      stream: options => this.dispatch(options, generation),
+    }
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    yield* this.dispatch(options, await this.capture(options.provider, options.model, options.signal))
+  }
+
+  /** Resolve the exact route once and derive the capability facts from it. */
+  private async capture(provider: string, model: string, signal?: AbortSignal): Promise<CallGeneration> {
+    const info = await this.resolveModel(provider, model, signal)
+    const target = resolveQoderModelId(model, this.modelAliases)
+    // Same cache-first rule as the resolution above: a dispatch may not stall
+    // on a catalogue fetch to learn window facts a snapshot already carries.
+    const live = (await cachedModels(this.catalog.snapshot(), () => this.catalog.liveModels()))
+      .find(entry => entry.value === target)
+    const declared = info.context?.contextWindow
+    return {
+      info,
+      vision: info.inputModalities?.includes('image') === true,
+      cliContextWindow: declared === undefined ? undefined : cliContextWindow(live, declared),
+    }
+  }
+
+  private async *dispatch(options: GenerateOptions, generation: CallGeneration): AsyncGenerator<StreamChunk> {
+    const model = resolveQoderModelId(options.model, this.modelAliases)
+    if (options.sessionId === undefined || options.purpose !== undefined) {
+      // Side channels summarise text; pixels would only cost them context.
+      // A side-channel request carries its instruction as the last user message
+      // (compaction appends one), so it is rendered as the task rather than as a
+      // turn to continue. See renderSideChannelFeed.
+      const prompt = feedToText(renderSideChannelFeed(options.system, options.messages, this.imagePath), this.imagePath)
+      // Side channels (titles, compaction summaries) reuse the main session's
+      // model so dsh's recorded summarization target matches what qodercli
+      // actually runs — a different default route could have different
+      // context limits or quota, silently failing the compaction.
+      yield* this.sessions.coldStream(options, prompt, model)
+      return
+    }
+    const sessionId = String(options.sessionId)
+    // The seam carries no per-request context window: the route's capacity comes
+    // Two different windows, deliberately kept apart:
+    //  - `contextWindow` is what the harness is told and divides its percentage
+    //    by (the user's choice, when they made one).
+    //  - `cliContextWindow` is what the CLI will actually run with, and is
+    //    therefore the only honest denominator for its own context ratio. The
+    //    CLI ignores a declared window the model does not advertise, so these
+    //    two disagree exactly when the declaration is not honoured — and using
+    //    the declared one there inflates every reading.
+    const declaredWindow = generation.info.context?.contextWindow
+    const policy = {
+      ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
+      ...declaredWindow === undefined ? {} : { contextWindow: declaredWindow },
+      ...generation.cliContextWindow === undefined ? {} : { cliContextWindow: generation.cliContextWindow },
+    }
+    let session = this.sessions.forSession(sessionId, model)
+    if (session.isDisposed) {
+      this.sessions.dispose(sessionId)
+      session = this.sessions.forSession(sessionId, model)
+    }
+    if (session.fedMessages === undefined) {
+      yield* this.firstTurn(session, options, model, policy, generation.vision)
+      return
+    }
+    const tail = options.messages.slice(session.fedMessages.length)
+    const images = await this.resolveTurnImages(tail, generation.vision, options.signal)
+    session.deliverToolResults(tail, images)
+    const plan = planContinuation(session.fedMessages, options.messages)
+    const systemChanged = options.system !== undefined && options.system !== session.fedSystem
+    if (plan.rebuild || systemChanged) {
+      this.sessions.dispose(sessionId)
+      session = this.sessions.forSession(sessionId, model)
+      yield* this.firstTurn(session, options, model, policy, generation.vision)
+      return
+    }
+    session.setModel(model, policy)
+    session.ensureTools(options.tools ?? [])
+    session.recordRequestInput(options.system, options.messages)
+    session.fedMessages = options.messages
+    session.fedSystem = options.system
+    const feed = plan.feed === null ? null : await this.buildFeed(plan.feed, generation.vision, images)
+    yield* session.stream(options, feed, plan.feed === null ? undefined : feedToText(plan.feed, this.imagePath))
+  }
+
+  private async *firstTurn(
+    session: QoderSession,
+    options: GenerateOptions,
+    model: string,
+    policy: SessionModelPolicy,
+    vision: boolean,
+  ): AsyncGenerator<StreamChunk> {
+    session.setModel(model, policy)
+    session.setSystem(options.system)
+    // Older dsh-llm releases lack the cwd field on GenerateOptions; read it
+    // through the widened view so this adapter compiles against the peer range.
+    const cwd = (options as GenerateOptions & { cwd?: string }).cwd
+    session.setCwd(cwd)
+    session.ensureTools(options.tools ?? [])
+    session.recordRequestInput(options.system, options.messages)
+    session.fedMessages = options.messages
+    session.fedSystem = options.system
+    const feed = renderInitialFeed(options.system, options.messages, this.imagePath)
+    const images = await this.resolveImages(feedImageRefs(feed), vision, options.signal)
+    yield* session.stream(options, await this.buildFeed(feed, vision, images), feedToText(feed, this.imagePath))
+  }
+
+  /** Image references carried by a message tail, skipping assistant content. */
+  private async resolveTurnImages(
+    tail: readonly RequestMessage[],
+    vision: boolean,
+    signal?: AbortSignal,
+  ): Promise<ResolvedImages> {
+    const refs = tail.flatMap(message => message.role === 'assistant' ? [] : imageRefs(message.content))
+    return this.resolveImages(refs, vision, signal)
+  }
+
+  /** Resolve image references into base64 request bytes; absent reader → none. */
+  private async resolveImages(
+    refs: readonly ImageAttachmentRef[],
+    vision: boolean,
+    signal?: AbortSignal,
+  ): Promise<ResolvedImages> {
+    const map = new Map<string, { data: string, mediaType: string }>()
+    if (!vision || this.readImage === undefined || refs.length === 0) return map
+    for (const ref of refs) {
+      const key = String(ref.attachmentId)
+      if (map.has(key)) continue
+      try {
+        const image = await this.readImage(ref, signal)
+        if (image !== undefined) {
+          map.set(key, { data: Buffer.from(image.bytes).toString('base64'), mediaType: image.mediaType })
+        }
+      } catch {
+        // One unreadable attachment degrades to handle text; the turn continues.
+      }
+    }
+    return map
+  }
+
+  /**
+   * Turn a feed into channel content. A text feed passes through; a non-vision
+   * feed flattens to the harness's own image handle text; an image the host
+   * could not read keeps a note naming what was dropped, so the inner model
+   * still knows the attachment was there.
+   */
+  private async buildFeed(
+    feed: Feed,
+    vision: boolean,
+    images: ResolvedImages,
+  ): Promise<string | ChannelContent[]> {
+    if (typeof feed === 'string') return feed
+    if (!vision) return feedToText(feed, this.imagePath)
+    const content: ChannelContent[] = []
+    let pixels = 0
+    for (const part of feed) {
+      if (part.type === 'text') {
+        if (part.text.length > 0) content.push({ type: 'text', text: part.text })
+        continue
+      }
+      const key = String(part.attachment.attachmentId)
+      const resolved = images.get(key)
+      const path = this.imagePath?.(part.attachment)
+      if (resolved === undefined) {
+        content.push({
+          type: 'text',
+          text: `[图片附件 ${key} 本次未能读取${path === undefined ? '' : `；本机文件：${path}`}，请基于文字内容继续]`,
+        })
+        continue
+      }
+      // The pixels let the model read the image; this handle lets it find and
+      // edit the source file. Without it a "modify this image" turn searches
+      // the workspace for a file that was never there.
+      content.push({ type: 'text', text: imageRefText(part.attachment, path) })
+      pixels += 1
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: resolved.mediaType, data: resolved.data },
+      })
+    }
+    // Nothing to show as pixels: stay in the historical single-string shape.
+    return pixels === 0 ? content.map(block => block.type === 'text' ? block.text : '').join('\n\n') : content
+  }
+
+  /**
+   * Drop every warm inner session without unloading the plugin.
+   *
+   * Signing out has to invalidate them: each holds a CLI process that already
+   * loaded its credentials, so it would keep answering as the account that was
+   * just signed out. The next turn starts a fresh process, which then reports
+   * the signed-out state honestly.
+   */
+  closeSessions(): void {
+    this.sessions.closeAll()
+  }
+
+  /** Tear down every warm inner session (plugin dispose). */
+  close(): void {
+    this.sessions.closeAll()
+  }
+}
+
+interface ContinuationPlan {
+  /** Feed for the inner session this turn, or null for a pure continuation. */
+  feed: Feed | null
+  /** Whether the warm session must be rebuilt (history diverged past repair). */
+  rebuild: boolean
+}
+
+/**
+ * Decide what to feed on a continuation request. The previous list must be a
+ * prefix (same length growth, index 0 untouched, at most two in-place
+ * mutations — the host refreshes runtime-context snapshots in place every
+ * turn). Tail tool-result messages were already resolved into parked handlers
+ * and never feed; fresh user turns and mutated messages do.
+ */
+export function planContinuation(
+  previous: readonly RequestMessage[],
+  current: readonly RequestMessage[],
+): ContinuationPlan {
+  if (current.length <= previous.length) return { feed: null, rebuild: true }
+  const mutated: number[] = []
+  for (let i = 0; i < previous.length; i++) {
+    if (JSON.stringify(previous[i]) !== JSON.stringify(current[i])) mutated.push(i)
+  }
+  if (mutated.includes(0) || mutated.length > 2) return { feed: null, rebuild: true }
+  const tail = current.slice(previous.length)
+  const freshUser = tail.filter(m => m.role === 'user')
+  if (freshUser.length === 0 && mutated.length === 0) return { feed: null, rebuild: false }
+  const parts: Feed[] = []
+  for (const index of mutated) {
+    const message = current[index]
+    if (message !== undefined) parts.push(renderRefreshed(message))
+  }
+  for (const message of freshUser) parts.push(renderUserTurn(message.content))
+  const feed = joinFeeds(parts)
+  return { feed: typeof feed === 'string' && feed.length === 0 ? null : feed, rebuild: false }
+}

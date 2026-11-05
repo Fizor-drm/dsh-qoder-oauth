@@ -1,0 +1,117 @@
+{
+  "name": "dsh-qoder-oauth",
+  "displayName": "Qoder OAuth",
+  "description": "Qoder (CN and Global), CodeBuddy and MiniMax Code login and model provider for DeepSeek Harness, via the official CLIs and Agent SDKs.",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "author": "Fizor-drm",
+  "keywords": [
+    "dsh-plugin",
+    "dsh-agent-sdk-bridge",
+    "agent-sdk-bridge",
+    "deepseek-harness",
+    "deepseek",
+    "qoder",
+    "qoder-cn",
+    "qoder-international",
+    "codebuddy",
+    "codebuddy-code",
+    "minimax",
+    "minimax-code",
+    "acp",
+    "agent-client-protocol",
+    "quota",
+    "model-provider",
+    "agent-sdk",
+    "dsh-qoder-oauth",
+    "qoder-oauth"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fizor-drm/dsh-qoder-oauth.git"
+  },
+  "homepage": "https://github.com/Fizor-drm/dsh-qoder-oauth#readme",
+  "bugs": {
+    "url": "https://github.com/Fizor-drm/dsh-qoder-oauth/issues"
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "icon": "./icon.png",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "lib",
+    "src",
+    "scripts",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.png",
+    "locale/*.json",
+    "README.md",
+    "FAQ.md",
+    "DEVELOPMENT.md",
+    "FORK-NOTICE.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cosmokit": "*",
+    "@deepseek-ai/dsh-attachment": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.9.0",
+    "@qoder-ai/qoder-agent-sdk": "^1.0.58",
+    "@qodercn-ai/qodercn-agent-sdk": "^1.0.58",
+    "@tencent-ai/agent-sdk": "^0.3.289",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
+    "@types/node": "^22.0.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown",
+    "build:clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit false --emitDeclarationOnly",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build:clean && npm test"
+  }
+}
